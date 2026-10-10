@@ -424,26 +424,28 @@ function connectLiveHost(harness: ReturnType<typeof makeHarness>) {
     Buffer.from(
       JSON.stringify({
         type: 'host.hello',
+        kind: 'browser',
         protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
         hostVersion: '1.0.0',
         bundleId: LIVE_WEB_HOST_BUNDLE_ID,
         instanceNonce: 'host_instance_nonce_0001',
         permissions: {
           microphone: 'granted',
-          camera: 'granted',
-          accessibility: 'granted',
-          screenRecording: 'granted',
         },
         selfChecks: {
           audioInput: true,
           audioOutput: true,
-          globalShortcut: true,
-          appshot: true,
         },
       }),
     ),
     false,
   );
+  expect(liveHost.getStatus().requirements).toMatchObject({
+    microphone: 'ready',
+    audioInput: 'ready',
+    audioOutput: 'ready',
+  });
+  expect(liveHost.getStatus().requirements).not.toHaveProperty('accessibility');
   return {
     liveHost,
     onStop,
@@ -1647,7 +1649,7 @@ describe('LiveSessionCoordinator', () => {
     });
   });
 
-  it('settles the real host stop after fatal teardown with pending speech', async () => {
+  it('settles the real host stop when the drain deadline fires after a fatal teardown', async () => {
     vi.useFakeTimers();
     const harness = makeHarness({ gracefulStopDrainMs: 50 });
     const { liveHost, onStop, start } = connectLiveHost(harness);
@@ -1678,7 +1680,10 @@ describe('LiveSessionCoordinator', () => {
     await vi.advanceTimersByTimeAsync(50);
 
     expect.soft(settled).toBe(true);
-    expect.soft(outcome).toEqual({ error: expect.any(String) });
+    expect.soft(outcome).toEqual({
+      error:
+        'Live Voice could not confirm the final spoken input before the stop deadline.',
+    });
     expect(liveHost.getStatus()).toMatchObject({
       available: true,
       state: 'error',
