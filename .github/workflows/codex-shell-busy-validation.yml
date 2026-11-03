@@ -1,0 +1,49 @@
+name: Validate shell busy-state merge candidate
+on:
+  push:
+    branches:
+      - codex-ci/qwen13449-merge-20261104-0f2c7d7
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      WORKFLOW_SIZE_BASE_SHA: 35aa4b76ae10a458632d23c9b0052af5a31b3885
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: GoldArowana/qwen-code
+          ref: 0f2c7d7d8a0830092a710e6cfc4cf247757265d8
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Assert exact candidate source
+        run: |
+          test "$(git rev-parse HEAD)" = "0f2c7d7d8a0830092a710e6cfc4cf247757265d8"
+          git show -s --format='source=%H tree=%T parents=%P'
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 24.22.1
+          package-manager-cache: false
+      - name: Install pinned dependencies and build prerequisite workspaces
+        run: |
+          corepack enable
+          corepack pnpm install --frozen-lockfile --reporter=append-only
+      - name: Build all workspaces
+        run: npm run build
+      - name: Affected hook processor and queue tests
+        working-directory: packages/cli
+        run: corepack pnpm exec vitest run src/ui/hooks/use-llm-stream.test.tsx src/ui/hooks/shellCommandProcessor.test.ts src/ui/hooks/useMessageQueue.test.ts --maxWorkers=2 --no-file-parallelism
+      - name: Workspace and integration typecheck
+        run: npm run typecheck
+      - name: Scoped formatting and lint
+        run: |
+          corepack pnpm exec prettier --check docs/users/features/commands.md packages/cli/src/ui/hooks/shellCommandProcessor.test.ts packages/cli/src/ui/hooks/shellCommandProcessor.ts packages/cli/src/ui/hooks/use-llm-stream.test.tsx packages/cli/src/ui/hooks/use-llm-stream.ts
+          corepack pnpm exec eslint packages/cli/src/ui/hooks/shellCommandProcessor.test.ts packages/cli/src/ui/hooks/shellCommandProcessor.ts packages/cli/src/ui/hooks/use-llm-stream.test.tsx packages/cli/src/ui/hooks/use-llm-stream.ts
+      - name: Bundle and version smoke
+        run: |
+          npm run bundle
+          node dist/cli.js --version
+      - name: Confirm checks did not modify source
+        run: git diff --exit-code
