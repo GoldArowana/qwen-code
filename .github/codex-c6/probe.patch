@@ -1,0 +1,109 @@
+--- a/packages/cli/src/ui/hooks/use-llm-stream.test.tsx
++++ b/packages/cli/src/ui/hooks/use-llm-stream.test.tsx
+@@ -20397,6 +20397,106 @@
+       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+     });
+ 
++
++    it('independent-13449-C6 cancellation followed by Content preserves Shell ownership', async () => {
++      const shell = deferred<ShellExecutionResult>();
++      const finishModel = deferred<void>();
++      mockExecuteRuntimeShell.mockResolvedValue({ result: shell.promise });
++      const modelMarker = 'C6_MODEL_SUCCESSOR_MARKER';
++      const tailMarker = 'C6_LATE_SHELL_OUTPUT';
++      let contentYielded = false;
++      mockSendMessageStream.mockImplementationOnce(async function* () {
++        contentYielded = true;
++        yield { type: ServerLlmEventType.Content, value: modelMarker };
++        await finishModel.promise;
++        yield {
++          type: ServerLlmEventType.Finished,
++          value: { reason: 'STOP', usageMetadata: undefined },
++        };
++      });
++      const { result } = renderTestHook();
++      let successorQuery: Promise<void> | undefined;
++      try {
++        await act(async () => {
++          await result.current.submitQuery(
++            'printf c6-shell',
++            SendMessageType.UserQuery,
++            undefined,
++            { shellMode: true },
++          );
++        });
++        const signal = mockExecuteRuntimeShell.mock.calls[0][4] as AbortSignal;
++        const shellPanel = result.current.pendingHistoryItems.find(
++          (item) => item.type === 'tool_group',
++        );
++        expect(shellPanel?.type).toBe('tool_group');
++        const callId = shellPanel?.type === 'tool_group' ? shellPanel.tools[0].callId : undefined;
++        expect(callId).toBeDefined();
++        const shellRows = () => mockAddItem.mock.calls
++          .map(([item]) => item)
++          .filter((item) => item.type === 'tool_group' && item.tools.some(
++            (tool: IndividualToolCallDisplay) => tool.callId === callId,
++          ));
++        const shellStillPending = () => result.current.pendingHistoryItems.some(
++          (item) => item.type === 'tool_group' && item.tools.some((tool) => tool.callId === callId),
++        );
++        let cancelReturned = false;
++        act(() => { cancelReturned = result.current.cancelOngoingRequest(); });
++        const afterCancel = {
++          cancelReturned,
++          signalAborted: signal.aborted,
++          shellStillPending: shellStillPending(),
++          shellRows: shellRows().map((item) => item.tools.map((tool: IndividualToolCallDisplay) => tool.status)),
++        };
++        await act(async () => {
++          successorQuery = result.current.submitQuery('C6 successor model prompt');
++          await Promise.resolve();
++        });
++        await waitFor(() => expect(contentYielded).toBe(true));
++        await waitFor(() => expect(JSON.stringify(result.current.pendingHistoryItems)).toContain(modelMarker));
++        const afterContent = {
++          shellStillPending: shellStillPending(),
++          modelVisible: JSON.stringify(result.current.pendingHistoryItems).includes(modelMarker),
++          shellRows: shellRows().map((item) => item.tools.map((tool: IndividualToolCallDisplay) => tool.status)),
++        };
++        const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + outputUpdateIntervalMs + 1);
++        try {
++          act(() => mockExecuteRuntimeShell.mock.calls[0][3]({ type: 'data', chunk: tailMarker }));
++        } finally {
++          clock.mockRestore();
++        }
++        const shellTailVisible = JSON.stringify(result.current.pendingHistoryItems).includes(tailMarker);
++        await act(async () => {
++          // A controlled successful exit is legal even after the abort request races it.
++          shell.resolve({ ...shellResult(), output: 'C6_SHELL_FINAL', rawOutput: Buffer.from('C6_SHELL_FINAL') });
++        });
++        await waitFor(() => expect(shellRows().some((item) => item.tools.some(
++          (tool: IndividualToolCallDisplay) => tool.status === ToolCallStatus.Success,
++        ))).toBe(true));
++        const finalRows = shellRows();
++        const observation = {
++          sourceLabel: process.env['QWEN_C6_SOURCE_LABEL'] ?? 'unspecified',
++          afterCancel,
++          afterContent,
++          shellTailVisible,
++          modelVisibleAfterShellSettlement: JSON.stringify(result.current.pendingHistoryItems).includes(modelMarker),
++          finalShellRowCount: finalRows.length,
++          finalStatuses: finalRows.flatMap((item) => item.tools.map((tool: IndividualToolCallDisplay) => tool.status)),
++          finalOutputs: finalRows.flatMap((item) => item.tools.map((tool: IndividualToolCallDisplay) => tool.resultDisplay)),
++        };
++        process.stdout.write(`PROBE-C6-INDEPENDENT ${JSON.stringify(observation)}\n`);
++        // Desired ownership contract: one final Success row, no frozen Executing row.
++        expect(finalRows).toHaveLength(1);
++        expect(observation.finalStatuses).toEqual([ToolCallStatus.Success]);
++      } finally {
++        await act(async () => {
++          shell.resolve(shellResult());
++          finishModel.resolve();
++          await successorQuery;
++        });
++      }
++    });
++
+     it('cancels the shell after submission cleanup and admits a successor while it settles', async () => {
+       const shell = deferred<ShellExecutionResult>();
+       mockExecuteRuntimeShell.mockResolvedValue({ result: shell.promise });
