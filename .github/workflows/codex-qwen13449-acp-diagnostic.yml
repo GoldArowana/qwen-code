@@ -1,0 +1,69 @@
+name: Qwen13449 ACP base and candidate diagnostic
+on:
+  push:
+    branches:
+      - codex-ci/qwen13449-acp-diagnostic-20261104-78a74064
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: main
+            source: ed6760aa2c30b1d48c368822b7cd061e7e2711b7
+            tree: 27fcfd77ce0b04fbca9de9cbfc12c1c408c8674f
+          - name: candidate
+            source: 73dc06fea16ce4e0636de3f597bcc8d4cfcddcf2
+            tree: 7bf608d5296762e74a07706f6542f9a9498da31e
+    name: ACP diagnostic (${{ matrix.name }})
+    env:
+      EXPECTED_SOURCE: ${{ matrix.source }}
+      EXPECTED_TREE: ${{ matrix.tree }}
+      WORKFLOW_SIZE_BASE_SHA: ed6760aa2c30b1d48c368822b7cd061e7e2711b7
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: GoldArowana/qwen-code
+          ref: ${{ matrix.source }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Assert exact source and tree
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          test "$(git show -s --format=%T)" = "$EXPECTED_TREE"
+          git show -s --format='source=%H tree=%T parents=%P'
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 24.22.1
+          package-manager-cache: false
+      - name: Pinned dependency install and full workspace prepare build
+        run: |
+          corepack enable
+          corepack pnpm install --frozen-lockfile --reporter=append-only
+      - name: Observe all five exact ACP test attempts and preserve aggregate failure
+        working-directory: packages/cli
+        run: |
+          failed=0
+          for attempt in 1 2 3 4 5; do
+            echo "ACP_DIAGNOSTIC_ATTEMPT_BEGIN=$attempt SOURCE=$EXPECTED_SOURCE"
+            set +e
+            corepack pnpm exec vitest run src/acp-integration/acp-output.test.ts --maxWorkers=2 --no-file-parallelism
+            result=$?
+            set -e
+            echo "ACP_DIAGNOSTIC_ATTEMPT_EXIT=$result ATTEMPT=$attempt SOURCE=$EXPECTED_SOURCE"
+            if [ "$result" -ne 0 ]; then
+              failed=1
+            fi
+          done
+          echo "ACP_DIAGNOSTIC_AGGREGATE_FAILED=$failed SOURCE=$EXPECTED_SOURCE"
+          exit "$failed"
+      - name: Always verify exact source and tracked source clean
+        if: always()
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          test "$(git show -s --format=%T)" = "$EXPECTED_TREE"
+          git diff HEAD --exit-code
