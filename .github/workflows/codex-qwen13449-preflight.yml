@@ -1,0 +1,88 @@
+name: Qwen13449 exact-source full preflight
+on:
+  push:
+    branches:
+      - codex-ci/qwen13449-preflight-20261104-78a74064
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      WORKFLOW_SIZE_BASE_SHA: ed6760aa2c30b1d48c368822b7cd061e7e2711b7
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: GoldArowana/qwen-code
+          ref: 73dc06fea16ce4e0636de3f597bcc8d4cfcddcf2
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Assert exact candidate source
+        run: |
+          test "$(git rev-parse HEAD)" = "73dc06fea16ce4e0636de3f597bcc8d4cfcddcf2"
+          test "$(git show -s --format=%T)" = "7bf608d5296762e74a07706f6542f9a9498da31e"
+          git show -s --format='source=%H tree=%T parents=%P'
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 24.22.1
+          package-manager-cache: false
+      - name: Verify actual upstream lint gate freshness
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { execFile } from 'node:child_process';
+          import { promisify } from 'node:util';
+          import { findStaleGateFiles, renderReport } from './.github/scripts/check-lint-gate-freshness.mjs';
+          const execute = promisify(execFile);
+          const repo = 'QwenLM/qwen-code';
+          const headSha = '73dc06fea16ce4e0636de3f597bcc8d4cfcddcf2';
+          const fetchJson = async (path) => {
+            const actualPath = path.replace('/repos/QwenLM/qwen-code/compare/', '/repos/GoldArowana/qwen-code/compare/');
+            const { stdout } = await execute('gh', ['api', actualPath], { maxBuffer: 16 * 1024 * 1024 });
+            const data = JSON.parse(stdout);
+            console.log('gate-api ' + JSON.stringify({ path, actualPath, latest: Array.isArray(data) ? data[0]?.sha ?? null : undefined, status: Array.isArray(data) ? undefined : data.status }));
+            return data;
+          };
+          const stale = await findStaleGateFiles({ fetchJson, repo, baseRef: 'main', headSha });
+          if (stale.length) {
+            console.error(renderReport(stale, 'main'));
+            process.exit(1);
+          }
+          console.log('Lint gate freshness OK: actual upstream ' + repo + '/main gate commits are contained in source ' + headSha + '.');
+          NODE
+      - name: Install pinned dependencies and full workspace prepare build
+        run: |
+          corepack enable
+          corepack pnpm install --frozen-lockfile --reporter=append-only
+      - name: Affected hook processor and queue tests
+        working-directory: packages/cli
+        run: corepack pnpm exec vitest run src/ui/hooks/use-llm-stream.test.tsx src/ui/hooks/shellCommandProcessor.test.ts src/ui/hooks/useMessageQueue.test.ts --maxWorkers=2 --no-file-parallelism
+      - name: Current-main UI and input integration tests
+        working-directory: packages/cli
+        run: corepack pnpm exec vitest run src/ui/AppContainer.test.tsx src/ui/components/ShellInputPrompt.test.tsx src/ui/hooks/use-project-hooks-approval.test.ts src/ui/commands/contextCommand.test.ts --maxWorkers=2 --no-file-parallelism
+      - name: Current-main core mods runtime tests
+        working-directory: packages/core
+        run: corepack pnpm exec vitest run src/mods/claude-events.test.ts src/mods/runtime.test.ts --maxWorkers=2 --no-file-parallelism
+      - name: Workspace and integration typecheck
+        run: npm run typecheck
+      - name: Scoped formatting and lint
+        run: |
+          corepack pnpm exec prettier --check docs/users/features/commands.md packages/cli/src/ui/hooks/shellCommandProcessor.test.ts packages/cli/src/ui/hooks/shellCommandProcessor.ts packages/cli/src/ui/hooks/use-llm-stream.test.tsx packages/cli/src/ui/hooks/use-llm-stream.ts
+          corepack pnpm exec eslint packages/cli/src/ui/hooks/shellCommandProcessor.test.ts packages/cli/src/ui/hooks/shellCommandProcessor.ts packages/cli/src/ui/hooks/use-llm-stream.test.tsx packages/cli/src/ui/hooks/use-llm-stream.ts
+      - name: Bundle and version smoke
+        run: |
+          npm run bundle
+          node dist/cli.js --version
+      - name: Confirm scoped checks did not modify source
+        run: git diff HEAD --exit-code
+      - name: Canonical full preflight required by contribution rules
+        timeout-minutes: 35
+        run: npm run preflight
+      - name: Confirm canonical preflight kept exact source
+        if: always()
+        run: |
+          test "$(git rev-parse HEAD)" = "73dc06fea16ce4e0636de3f597bcc8d4cfcddcf2"
+          test "$(git show -s --format=%T)" = "7bf608d5296762e74a07706f6542f9a9498da31e"
+          git diff HEAD --exit-code
