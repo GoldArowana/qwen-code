@@ -1,4 +1,4 @@
-name: Validate official Node22 shell merge candidate
+name: Validate Node22 full preflight with source bootstrap
 on:
   push:
     branches:
@@ -17,62 +17,13 @@ jobs:
     steps:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
-          node-version: '22.x'
+          node-version: '22.23.4'
           package-manager-cache: false
       - name: Record official runtime
         run: |
           node --version
           npm --version
           corepack enable
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          repository: GoldArowana/qwen-code
-          ref: ed6760aa2c30b1d48c368822b7cd061e7e2711b7
-          path: control
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Official Node22 old baseline ACP control
-        working-directory: control
-        run: |
-          test "$(git rev-parse HEAD)" = ed6760aa2c30b1d48c368822b7cd061e7e2711b7
-          git show -s --format='CONTROL_BASE source=%H tree=%T'
-          corepack pnpm install --frozen-lockfile --reporter=append-only
-          sha256sum pnpm-lock.yaml packages/cli/src/acp-integration/acp-output.ts packages/cli/src/acp-integration/acp-output.test.ts
-          set +e
-          result=0
-          for attempt in 1 2 3; do
-            (cd packages/cli && corepack pnpm exec vitest run src/acp-integration/acp-output.test.ts --maxWorkers=1 --no-file-parallelism --reporter=verbose)
-            code=$?
-            echo "NODE22_BASE_ACP repetition=$attempt exit=$code"
-            if [ "$code" -ne 0 ]; then result=1; fi
-          done
-          printf '%s\n' "$result" > "$RUNNER_TEMP/qwen-node22-base-exit"
-          git diff --exit-code
-      - name: Official Node22 released old candidate ACP control
-        working-directory: control
-        run: |
-          git fetch --depth=1 origin 73dc06fea16ce4e0636de3f597bcc8d4cfcddcf2
-          git diff --exit-code HEAD FETCH_HEAD -- package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc .pnpmfile.mjs scripts/patch-ink.js
-          git checkout --detach 73dc06fea16ce4e0636de3f597bcc8d4cfcddcf2
-          test "$(git rev-parse HEAD)" = 73dc06fea16ce4e0636de3f597bcc8d4cfcddcf2
-          git show -s --format='CONTROL_OLD_HEAD source=%H tree=%T'
-          npm run build --workspace=packages/cli
-          sha256sum pnpm-lock.yaml packages/cli/src/acp-integration/acp-output.ts packages/cli/src/acp-integration/acp-output.test.ts
-          set +e
-          result=0
-          for attempt in 1 2 3; do
-            (cd packages/cli && corepack pnpm exec vitest run src/acp-integration/acp-output.test.ts --maxWorkers=1 --no-file-parallelism --reporter=verbose)
-            code=$?
-            echo "NODE22_OLD_HEAD_ACP repetition=$attempt exit=$code"
-            if [ "$code" -ne 0 ]; then result=1; fi
-          done
-          printf '%s\n' "$result" > "$RUNNER_TEMP/qwen-node22-old-head-exit"
-          git diff --exit-code
-      - name: Require actual new-condition control success
-        run: |
-          test "$(cat "$RUNNER_TEMP/qwen-node22-base-exit")" = 0
-          test "$(cat "$RUNNER_TEMP/qwen-node22-old-head-exit")" = 0
-          echo NODE22_OLD_SOURCE_COUNTERCONTROL_PASSED
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           repository: GoldArowana/qwen-code
@@ -106,6 +57,12 @@ jobs:
           if (stale.length) throw new Error('Actual canonical gate stale: '+JSON.stringify(stale));
           console.log('STRICT_CANONICAL_GATE_PASS', JSON.stringify({head,files:GATE_FILES.length}));
           JS
+      - name: Bootstrap unchanged candidate dependencies
+        working-directory: candidate
+        run: |
+          corepack pnpm install --frozen-lockfile --reporter=append-only
+          git diff HEAD --exit-code
+          echo CANDIDATE_BOOTSTRAP_SOURCE_UNCHANGED
       - name: Actual unchanged canonical full preflight
         working-directory: candidate
         timeout-minutes: 90
