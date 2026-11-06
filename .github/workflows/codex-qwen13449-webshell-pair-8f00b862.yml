@@ -1,0 +1,79 @@
+name: Diagnose Qwen13449 full webshell pair 8f00b862
+on:
+  push:
+    branches:
+      - 'codex-ci/qwen13449-webshell-pair-8f00b862'
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    name: Full web-shell package tests (${{ matrix.label }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - label: integrated-main-base
+            source: 07a467c38a51f1d7d51ea4c12e00e24f825d4f0b
+            tree: dc95aa7653aa5bafb86f4588e1274bdd392ac255
+          - label: prepared-candidate
+            source: 47a4d4ca678e0d89a8c93a3ae4ef86d7d367910a
+            tree: ee93c369a989c1c355f346526ed54e5059e2ce95
+    env:
+      CI: 'true'
+      NODE_OPTIONS: --max-old-space-size=6144
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '22.23.4'
+          package-manager-cache: false
+      - name: Record exact runtime and hosted runner
+        run: |
+          node --version
+          npm --version
+          corepack enable
+          uname -a
+          getconf _NPROCESSORS_ONLN
+          case "$RUNNER_NAME" in ecs-qwen-*) exit 1;; esac
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: GoldArowana/qwen-code
+          ref: '${{ matrix.source }}'
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Assert exact source identity
+        working-directory: source
+        run: |
+          test "$(git rev-parse HEAD)" = '${{ matrix.source }}'
+          test "$(git rev-parse HEAD^{tree})" = '${{ matrix.tree }}'
+          git show -s --format='DIAGNOSTIC source=%H tree=%T parents=%P'
+          git diff HEAD --exit-code
+          corepack pnpm --version
+      - name: Bootstrap frozen source dependencies
+        working-directory: source
+        run: |
+          corepack pnpm install --frozen-lockfile --reporter=append-only
+          git diff HEAD --exit-code
+          echo DIAGNOSTIC_BOOTSTRAP_SOURCE_UNCHANGED
+      - name: Run unchanged full web-shell test:ci with default timeout
+        working-directory: source/packages/web-shell
+        timeout-minutes: 20
+        env:
+          NODE_OPTIONS: --max-old-space-size=3072
+        run: |
+          case "$RUNNER_NAME" in ecs-qwen-*) exit 1;; esac
+          echo DIAGNOSTIC_DEFAULT_TEST_TIMEOUT_5000_NO_OVERRIDE
+          /usr/bin/time -v npm run test:ci
+          echo DIAGNOSTIC_FULL_WEB_SHELL_TEST_CI_PASSED
+      - name: Always prove exact tracked source remained unchanged
+        if: always()
+        run: |
+          test -d source/.git
+          cd source
+          test "$(git rev-parse HEAD)" = '${{ matrix.source }}'
+          test "$(git rev-parse HEAD^{tree})" = '${{ matrix.tree }}'
+          git diff HEAD --exit-code
+          echo DIAGNOSTIC_FINAL_SOURCE_UNCHANGED
