@@ -1,0 +1,101 @@
+name: Qwen13449 controlled pair 514eb585
+
+on:
+  push:
+    branches:
+      - codex-ci/qwen13449-pair-514eb585
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    name: controlled-${{ matrix.role }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - role: baseline
+            head: cb282ef5cfe0ba77e2bf8dd3a0bcba302415f924
+            tree: dd82215a6db4022677d5de59b616fec8e574a52a
+          - role: candidate
+            head: 580c5d12fd8ab9d85874e570429a6e01624af2ea
+            tree: 99cc0b65f6fbb4fb9f93abe83dea404e6ebc6a39
+    env:
+      CI: 'true'
+      NODE_OPTIONS: --max-old-space-size=6144
+    steps:
+      - name: Check out immutable diagnostic source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: GoldArowana/qwen-code
+          ref: ${{ matrix.head }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Assert source and record runner identity
+        id: source
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = '${{ matrix.head }}'
+          test "$(git rev-parse 'HEAD^{tree}')" = '${{ matrix.tree }}'
+          git diff HEAD --exit-code
+          printf 'PAIR_SOURCE role=%s head=%s tree=%s\n' '${{ matrix.role }}' "$(git rev-parse HEAD)" "$(git rev-parse 'HEAD^{tree}')"
+          test -n "$ImageOS"
+          test -n "$ImageVersion"
+          printf 'PAIR_RUNNER image=%s image_version=%s os=%s arch=%s\n' "$ImageOS" "$ImageVersion" "$RUNNER_OS" "$RUNNER_ARCH"
+          cat /etc/os-release
+          sha256sum package.json pnpm-lock.yaml pnpm-workspace.yaml packages/cli/package.json packages/core/package.json packages/cli/vitest.config.ts packages/core/vitest.config.ts vitest.config.ts
+      - name: Set up the original Node release
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '22.23.4'
+          package-manager-cache: false
+      - name: Assert original package-manager versions
+        shell: bash
+        run: |
+          corepack enable
+          test "$(node --version)" = v22.23.4
+          test "$(npm --version)" = 10.9.9
+          test "$(corepack pnpm --version)" = 11.24.0
+          printf 'PAIR_RUNTIME node=%s npm=%s pnpm=%s\n' "$(node --version)" "$(npm --version)" "$(corepack pnpm --version)"
+      - name: Bootstrap unchanged source
+        id: bootstrap
+        shell: bash
+        run: |
+          corepack pnpm install --frozen-lockfile --reporter=append-only
+          git diff HEAD --exit-code
+          echo PAIR_BOOTSTRAP_SOURCE_UNCHANGED
+      - name: Original CLI script with the complete failing test file
+        id: cli
+        if: ${{ !cancelled() && steps.source.outcome == 'success' && steps.bootstrap.outcome == 'success' }}
+        working-directory: packages/cli
+        shell: bash
+        run: |
+          set +e
+          CI=true NODE_OPTIONS=--max-old-space-size=3072 npm run test:ci -- src/commands/review/build-test.test.ts
+          result=$?
+          printf 'PAIR_CLI_EXIT=%s\n' "$result"
+          exit "$result"
+      - name: Original core script with both complete failing test files
+        id: core
+        if: ${{ !cancelled() && steps.source.outcome == 'success' && steps.bootstrap.outcome == 'success' }}
+        working-directory: packages/core
+        shell: bash
+        run: |
+          set +e
+          CI=true NODE_OPTIONS=--max-old-space-size=3072 npm run test:ci -- src/code-mode/scheduler.test.ts src/hooks/file-changed-watcher.test.ts
+          result=$?
+          printf 'PAIR_CORE_EXIT=%s\n' "$result"
+          exit "$result"
+      - name: Always verify diagnostic source and report step outcomes
+        if: ${{ always() && steps.source.outcome == 'success' }}
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = '${{ matrix.head }}'
+          test "$(git rev-parse 'HEAD^{tree}')" = '${{ matrix.tree }}'
+          git diff HEAD --exit-code
+          git diff --cached --exit-code
+          printf 'PAIR_OUTCOMES role=%s bootstrap=%s cli=%s core=%s\n' '${{ matrix.role }}' '${{ steps.bootstrap.outcome }}' '${{ steps.cli.outcome }}' '${{ steps.core.outcome }}'
+          echo PAIR_SOURCE_UNCHANGED
