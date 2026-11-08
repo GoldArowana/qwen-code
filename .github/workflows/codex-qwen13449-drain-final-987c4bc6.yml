@@ -1,0 +1,170 @@
+name: Validate Qwen13449 final drain 987c4bc6
+on:
+  push:
+    branches:
+      - 'codex-ci/qwen13449-drain-final-987c4bc6'
+permissions:
+  contents: read
+jobs:
+  targeted:
+    name: Exact final Shell and shared-loop regressions
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      CI: 'true'
+      NODE_OPTIONS: --max-old-space-size=6144
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '22.23.4'
+          package-manager-cache: false
+      - name: Record standard runtime
+        run: |
+          node --version
+          npm --version
+          corepack enable
+          case "$RUNNER_NAME" in ecs-qwen-*) exit 1;; esac
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: GoldArowana/qwen-code
+          ref: '42835a115ca86485e5115fcd51460bb8157f7cf7'
+          path: candidate
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Assert exact final candidate
+        working-directory: candidate
+        run: |
+          test "$(git rev-parse HEAD)" = '42835a115ca86485e5115fcd51460bb8157f7cf7'
+          test "$(git rev-parse HEAD^{tree})" = '97bf4741b522ad2a7bf8d614fb96146384c0c4bf'
+          git show -s --format='CANDIDATE source=%H tree=%T parents=%P'
+          git diff HEAD --exit-code
+      - name: Normal frozen bootstrap including workspace prerequisites
+        working-directory: candidate
+        run: |
+          corepack pnpm install --frozen-lockfile --reporter=append-only
+          git diff HEAD --exit-code
+          echo CANDIDATE_BOOTSTRAP_SOURCE_UNCHANGED
+      - name: Both complete affected CLI test files
+        working-directory: candidate/packages/cli
+        timeout-minutes: 12
+        run: |
+          corepack pnpm exec vitest run src/ui/hooks/shellCommandProcessor.test.ts src/ui/hooks/use-llm-stream.test.tsx --reporter=default --reporter=json --outputFile=/tmp/qwen13449-candidate.json
+          git diff HEAD --exit-code
+          echo TARGETED_SHELL_SHARED_LOOP_PASSED
+      - name: Same fixtures against actual current-main production modules
+        working-directory: candidate
+        timeout-minutes: 12
+        run: |
+          git fetch --no-tags --depth=1 https://github.com/QwenLM/qwen-code.git 88e509480059c699ef0d85c7963690eda17ce9b3
+          test "$(git rev-parse FETCH_HEAD)" = '88e509480059c699ef0d85c7963690eda17ce9b3'
+          git show FETCH_HEAD:packages/cli/src/ui/hooks/shellCommandProcessor.ts > packages/cli/src/ui/hooks/shellCommandProcessor.ts
+          git show FETCH_HEAD:packages/cli/src/ui/hooks/use-llm-stream.ts > packages/cli/src/ui/hooks/use-llm-stream.ts
+          test "$(git hash-object packages/cli/src/ui/hooks/shellCommandProcessor.ts)" = '52db2e8698bd46904836f75fb5e1c26344073a0c'
+          test "$(git hash-object packages/cli/src/ui/hooks/use-llm-stream.ts)" = '15671ef502c568717ee930be121d0581a8445e4f'
+          git diff --name-only
+          set +e
+          (cd packages/cli && corepack pnpm exec vitest run src/ui/hooks/shellCommandProcessor.test.ts src/ui/hooks/use-llm-stream.test.tsx --reporter=default --reporter=json --outputFile=/tmp/qwen13449-main-baseline.json)
+          result=$?
+          set -e
+          git restore --source=HEAD -- packages/cli/src/ui/hooks/shellCommandProcessor.ts packages/cli/src/ui/hooks/use-llm-stream.ts
+          git diff HEAD --exit-code
+          test "$result" -ne 0
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const baseline = JSON.parse(fs.readFileSync('/tmp/qwen13449-main-baseline.json','utf8'));
+          const overlap = baseline.testResults.flatMap(file => file.assertionResults).filter(test => test.fullName.includes('preserves a live Shell at the tool handoff with unified loop'));
+          if (overlap.length !== 2 || overlap.some(test => test.status !== 'failed')) throw new Error('Both actual-main overlap controls must fail');
+          console.log('ACTUAL_MAIN_BASELINE', JSON.stringify({tests:baseline.numTotalTests,passed:baseline.numPassedTests,failed:baseline.numFailedTests,overlap:overlap.map(test=>({name:test.fullName,status:test.status}))}));
+          JS
+      - name: Preserve complete targeted and actual-main results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: qwen13449-exact-paired-cli-results
+          path: /tmp/qwen13449-*.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Always prove exact tracked final candidate source
+        if: always()
+        run: |
+          test -d candidate/.git
+          cd candidate
+          test "$(git rev-parse HEAD)" = '42835a115ca86485e5115fcd51460bb8157f7cf7'
+          test "$(git rev-parse HEAD^{tree})" = '97bf4741b522ad2a7bf8d614fb96146384c0c4bf'
+          git diff HEAD --exit-code
+          echo CANDIDATE_SOURCE_UNCHANGED
+  canonical:
+    name: Unchanged complete canonical preflight
+    runs-on: ubuntu-26.04
+    timeout-minutes: 150
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CI: 'true'
+      NODE_OPTIONS: --max-old-space-size=6144
+      WORKFLOW_SIZE_BASE_SHA: 88e509480059c699ef0d85c7963690eda17ce9b3
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '22.23.4'
+          package-manager-cache: false
+      - name: Record standard runtime
+        run: |
+          node --version
+          npm --version
+          corepack enable
+          case "$RUNNER_NAME" in ecs-qwen-*) exit 1;; esac
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: GoldArowana/qwen-code
+          ref: '42835a115ca86485e5115fcd51460bb8157f7cf7'
+          path: candidate
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Assert exact final candidate
+        working-directory: candidate
+        run: |
+          test "$(git rev-parse HEAD)" = '42835a115ca86485e5115fcd51460bb8157f7cf7'
+          test "$(git rev-parse HEAD^{tree})" = '97bf4741b522ad2a7bf8d614fb96146384c0c4bf'
+          git show -s --format='CANDIDATE source=%H tree=%T parents=%P'
+          git diff HEAD --exit-code
+      - name: Strict actual canonical lint-gate containment
+        working-directory: candidate
+        run: |
+          node --input-type=module <<'JS'
+          import { execFileSync } from 'node:child_process';
+          import { GATE_FILES, findStaleGateFiles } from './.github/scripts/check-lint-gate-freshness.mjs';
+          const head = '42835a115ca86485e5115fcd51460bb8157f7cf7';
+          const fetchJson = async path => {
+            const endpoint = path.startsWith('/repos/QwenLM/qwen-code/compare/')
+              ? path.replace('/repos/QwenLM/qwen-code/compare/', '/repos/GoldArowana/qwen-code/compare/') : path;
+            const value = JSON.parse(execFileSync('gh', ['api', endpoint.slice(1)], {encoding:'utf8',maxBuffer:16*1024*1024}));
+            if (path.includes('/commits?')) console.log('GATE_CANONICAL', JSON.stringify({path,sha:value[0]?.sha}));
+            else console.log('GATE_CONTAINMENT', JSON.stringify({path,status:value.status,merge_base:value.merge_base_commit?.sha}));
+            return value;
+          };
+          const stale = await findStaleGateFiles({fetchJson,repo:'QwenLM/qwen-code',baseRef:'main',headSha:head});
+          if (stale.length) throw new Error('Actual canonical gate stale: '+JSON.stringify(stale));
+          console.log('STRICT_CANONICAL_GATE_PASS', JSON.stringify({head,files:GATE_FILES.length}));
+          JS
+      - name: Normal frozen bootstrap including workspace prerequisites
+        working-directory: candidate
+        run: |
+          corepack pnpm install --frozen-lockfile --reporter=append-only
+          git diff HEAD --exit-code
+          echo CANDIDATE_BOOTSTRAP_SOURCE_UNCHANGED
+      - name: Actual unchanged canonical full preflight
+        working-directory: candidate
+        timeout-minutes: 120
+        run: |
+          echo CANONICAL_PREFLIGHT_START
+          npm run preflight
+          echo CANONICAL_PREFLIGHT_PASSED
+      - name: Always prove exact tracked final candidate source
+        if: always()
+        run: |
+          test -d candidate/.git
+          cd candidate
+          test "$(git rev-parse HEAD)" = '42835a115ca86485e5115fcd51460bb8157f7cf7'
+          test "$(git rev-parse HEAD^{tree})" = '97bf4741b522ad2a7bf8d614fb96146384c0c4bf'
+          git diff HEAD --exit-code
+          echo CANDIDATE_SOURCE_UNCHANGED
