@@ -16,10 +16,7 @@ jobs:
         include:
           - role: main88
             source: '88e509480059c699ef0d85c7963690eda17ce9b3'
-            tree: '88e509480059c699ef0d85c7963690eda17ce9b3'
-          - role: candidate428
-            source: '42835a115ca86485e5115fcd51460bb8157f7cf7'
-            tree: '97bf4741b522ad2a7bf8d614fb96146384c0c4bf'
+            tree: 'a6fb0b135cfdb04f9a0439486930e6693c6704a7'
     env:
       CI: 'true'
       NODE_OPTIONS: --max-old-space-size=6144
