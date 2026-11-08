@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useState } from 'react';
 import { act } from '@testing-library/react';
-import { render } from 'ink-testing-library';
+import { render, cleanup as cleanupInk } from 'ink-testing-library';
 import type {
   Config,
   WorkflowApproval,
@@ -2291,4 +2291,129 @@ describe('BackgroundTasksDialog', () => {
       expect(frame).toContain('agent-general-purpose-call-9.jsonl');
     });
   });
+  // Diagnostic-only insertion inside the existing outer describe. Add
+  // `cleanup as cleanupInk` to the existing ink-testing-library import.
+  // Keep every original fixture and production module unchanged.
+  it.each(['retained-old-root', 'teardown-old-root'] as const)(
+    'controlled old Ink root routing witness with %s',
+    async (oldRootMode) => {
+      cleanupInk();
+      // Real Ink/React scheduling, setTimeout and Date remain unchanged.
+      // Only the recurring activity clock is under explicit control.
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+      const intervals = vi.spyOn(globalThis, 'setInterval');
+      try {
+        const oldDialog = setup([
+          workflowEntry({
+            id: 'wf_old_root',
+            runId: 'wf_old_root',
+            status: 'running',
+            endTime: undefined,
+          }),
+        ]);
+        oldDialog.call(() => oldDialog.probe.current!.actions.openDialog());
+        oldDialog.call(() => oldDialog.probe.current!.actions.enterDetail());
+        expect(oldDialog.probe.current!.state.dialogMode).toBe('detail');
+        await vi.waitFor(() => {
+          expect(
+            intervals.mock.calls.some(([, delay]) => delay === 1000),
+          ).toBe(true);
+        });
+
+        // The two variants differ only in whether this earlier root is
+        // unmounted before the new setup installs its shared mock closure.
+        if (oldRootMode === 'teardown-old-root') {
+          cleanupInk();
+        }
+        const newDialog = setup([
+          workflowEntry({
+            id: 'wf_new_root',
+            runId: 'wf_new_root',
+            status: 'running',
+            endTime: undefined,
+            pendingApprovals: [
+              {
+                approvalId: 'wf_new_root_approval',
+                subagentId: 'sub_new_root',
+                callId: 'call_new_root',
+                name: 'Shell',
+                description: 'controlled approval',
+                confirmationDetails: { type: 'exec' },
+                at: Date.now(),
+              },
+            ],
+          }),
+        ]);
+        await vi.waitFor(() => {
+          expect(newDialog.probe.current!.state.dialogMode).toBe('list');
+        });
+        expect(newDialog.probe.current!.state.autoOpened).toBe(true);
+        expect(newDialog.lastFrame()).not.toContain('Enter view');
+        expect(newDialog.lastFrame()).toContain('activate');
+
+        const registrationsBeforeTick = mockedUseKeypress.mock.calls.length;
+        act(() => {
+          vi.advanceTimersByTime(1000);
+        });
+        const registrationsAfterTick = mockedUseKeypress.mock.calls.length;
+
+        // Use the same public fixture entry and original assertion as the
+        // failed canonical case. No direct invocation of a captured handler.
+        newDialog.pressKey({ name: 'up' });
+        let activationWaitError: unknown;
+        try {
+          // Keep the original waitFor budget and state condition. The frame
+          // check also ensures a successful control has rendered its handler
+          // and activation hints before the ownership probe below.
+          await vi.waitFor(() => {
+            expect(newDialog.probe.current!.state.autoOpened).toBe(false);
+            expect(newDialog.lastFrame()).toContain('Enter view');
+          });
+        } catch (error) {
+          // Preserve the real assertion error while collecting routing facts.
+          activationWaitError = error;
+        }
+        const autoOpenedAfterUp = newDialog.probe.current!.state.autoOpened;
+        const hintAfterUp = newDialog.lastFrame();
+        newDialog.pressKey({ sequence: 'p' });
+        const routing = {
+          oldPauseCalls: oldDialog.workflowPause.mock.calls,
+          newPauseCalls: newDialog.workflowPause.mock.calls,
+        };
+
+        console.log('INK_ROOT_ROUTING_OBSERVATION', JSON.stringify({
+          oldRootMode,
+          registrationsBeforeTick,
+          registrationsAfterTick,
+          autoOpenedAfterUp,
+          activationHintVisible: hintAfterUp?.includes('Enter view'),
+          activationWaitError: activationWaitError instanceof Error ? activationWaitError.message : activationWaitError,
+          ...routing,
+        }));
+
+        // Soft assertions retain all observations if the original condition
+        // is false. Every failed assertion still makes this diagnostic red.
+        expect.soft(activationWaitError).toBeUndefined();
+        expect.soft(autoOpenedAfterUp).toBe(false);
+        expect.soft(hintAfterUp).toContain('Enter view');
+        expect.soft(routing).toEqual({
+          oldPauseCalls: [],
+          newPauseCalls: [['wf_new_root']],
+        });
+        if (oldRootMode === 'retained-old-root') {
+          expect(registrationsAfterTick).toBeGreaterThan(
+            registrationsBeforeTick,
+          );
+        }
+      } finally {
+        try {
+          cleanupInk();
+        } finally {
+          intervals.mockRestore();
+          vi.useRealTimers();
+        }
+      }
+    },
+  );
+
 });
