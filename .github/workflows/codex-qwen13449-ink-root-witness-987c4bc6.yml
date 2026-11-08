@@ -1,0 +1,72 @@
+name: Witness Qwen13449 Ink root routing 987c4bc6
+on:
+  push:
+    branches:
+      - 'codex-ci/qwen13449-ink-root-witness-987c4bc6'
+permissions:
+  contents: read
+jobs:
+  witness:
+    name: Controlled original Ink root routing witness
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    env:
+      CI: 'true'
+      NODE_OPTIONS: --max-old-space-size=6144
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '22.23.4'
+          package-manager-cache: false
+      - name: Record standard runtime
+        run: |
+          node --version
+          npm --version
+          corepack enable
+          node -e 'console.log(JSON.stringify({platform:process.platform,arch:process.arch,parallelism:require("os").availableParallelism()}))'
+          case "$RUNNER_NAME" in ecs-qwen-*) exit 1;; esac
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: GoldArowana/qwen-code
+          ref: '832cefcd774c96f7709955accb541db5c1be4c84'
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Assert controlled diagnostic source and original production
+        working-directory: source
+        run: |
+          test "$(git rev-parse HEAD)" = '832cefcd774c96f7709955accb541db5c1be4c84'
+          test "$(git rev-parse HEAD^{tree})" = '260e91562f1c0f45a7ca881d9b50c8baa579e5d8'
+          test "$(git hash-object packages/cli/src/ui/components/background-view/BackgroundTasksDialog.tsx)" = 'e764acbccfd3accd2c4f6b06b62347bb905d8218'
+          test "$(git hash-object packages/cli/src/ui/contexts/BackgroundTaskViewContext.tsx)" = 'af694374c8951d828fa64b5217fcb9a747126644'
+          git diff HEAD --exit-code
+      - name: Normal frozen bootstrap and workspace prerequisites
+        working-directory: source
+        run: |
+          corepack pnpm install --frozen-lockfile --reporter=append-only
+          git diff HEAD --exit-code
+          echo BOOTSTRAP_SOURCE_UNCHANGED
+      - name: Retained-root and teardown-root observations
+        working-directory: source/packages/cli
+        timeout-minutes: 8
+        env:
+          NODE_OPTIONS: --max-old-space-size=3072
+        run: |
+          corepack pnpm exec vitest run src/ui/components/background-view/BackgroundTasksDialog.test.tsx -t 'controlled old Ink root routing witness with' --silent=false --reporter=default --reporter=json --outputFile=/tmp/qwen-ink-root-witness.json
+      - name: Preserve actual controlled witness results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: qwen-ink-root-routing-witness
+          path: /tmp/qwen-ink-root-witness.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Always prove unchanged diagnostic source
+        if: always()
+        run: |
+          test -d source/.git
+          cd source
+          test "$(git rev-parse HEAD)" = '832cefcd774c96f7709955accb541db5c1be4c84'
+          test "$(git rev-parse HEAD^{tree})" = '260e91562f1c0f45a7ca881d9b50c8baa579e5d8'
+          git diff HEAD --exit-code
+          echo DIAGNOSTIC_SOURCE_UNCHANGED
