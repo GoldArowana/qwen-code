@@ -2338,7 +2338,12 @@ describe('BackgroundTasksDialog', () => {
                 callId: 'call_new_root',
                 name: 'Shell',
                 description: 'controlled approval',
-                confirmationDetails: { type: 'exec' },
+                confirmationDetails: {
+                  type: 'exec',
+                  title: 'Controlled approval',
+                  command: 'printf controlled',
+                  rootCommand: 'printf',
+                },
                 at: Date.now(),
               },
             ],
