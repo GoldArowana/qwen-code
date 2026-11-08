@@ -1,0 +1,60 @@
+name: Validate Qwen13449 shared drain 987c4bc6
+on:
+  push:
+    branches:
+      - 'codex-ci/qwen13449-drain-sync-987c4bc6'
+permissions:
+  contents: read
+jobs:
+  reproduce:
+    name: Exact union Shell handoff diagnostic
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    env:
+      CI: 'true'
+      NODE_OPTIONS: --max-old-space-size=6144
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '22.23.4'
+          package-manager-cache: false
+      - name: Record standard runtime
+        run: |
+          node --version
+          npm --version
+          corepack enable
+          case "$RUNNER_NAME" in ecs-qwen-*) exit 1;; esac
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: GoldArowana/qwen-code
+          ref: '11fc58d08926c1f24e0e42632f565e3fbb12f09f'
+          path: candidate
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Assert exact diagnostic source
+        working-directory: candidate
+        run: |
+          test "$(git rev-parse HEAD)" = '11fc58d08926c1f24e0e42632f565e3fbb12f09f'
+          test "$(git rev-parse HEAD^{tree})" = '6439f7158984f7519fb7fc8980ffeca5e5f7cec5'
+          git show -s --format='UNION source=%H tree=%T parents=%P'
+          git diff HEAD --exit-code
+      - name: Normal frozen bootstrap including workspace prerequisites
+        working-directory: candidate
+        run: |
+          corepack pnpm install --frozen-lockfile --reporter=append-only
+          git diff HEAD --exit-code
+          echo UNION_BOOTSTRAP_11fc58d08926c1f24e0e42632f565e3fbb12f09f_UNCHANGED
+      - name: Live Shell handoff reproduction
+        working-directory: candidate/packages/cli
+        timeout-minutes: 8
+        run: |
+          corepack pnpm exec vitest run src/ui/hooks/use-llm-stream.test.tsx -t 'preserves a live Shell at the tool handoff with unified loop'
+      - name: Always prove unchanged tracked diagnostic source
+        if: always()
+        run: |
+          test -d candidate/.git
+          cd candidate
+          test "$(git rev-parse HEAD)" = '11fc58d08926c1f24e0e42632f565e3fbb12f09f'
+          test "$(git rev-parse HEAD^{tree})" = '6439f7158984f7519fb7fc8980ffeca5e5f7cec5'
+          git diff HEAD --exit-code
+          echo UNION_SOURCE_UNCHANGED
