@@ -28,15 +28,15 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           repository: GoldArowana/qwen-code
-          ref: '832cefcd774c96f7709955accb541db5c1be4c84'
+          ref: 'a5e19396267497fbb3f4d2ed3ed3e893ed98df8e'
           path: source
           fetch-depth: 1
           persist-credentials: false
       - name: Assert controlled diagnostic source and original production
         working-directory: source
         run: |
-          test "$(git rev-parse HEAD)" = '832cefcd774c96f7709955accb541db5c1be4c84'
-          test "$(git rev-parse HEAD^{tree})" = '260e91562f1c0f45a7ca881d9b50c8baa579e5d8'
+          test "$(git rev-parse HEAD)" = 'a5e19396267497fbb3f4d2ed3ed3e893ed98df8e'
+          test "$(git rev-parse HEAD^{tree})" = '7996e3c5094c2a14e45f08d2f8100dac1789ceb6'
           test "$(git hash-object packages/cli/src/ui/components/background-view/BackgroundTasksDialog.tsx)" = 'e764acbccfd3accd2c4f6b06b62347bb905d8218'
           test "$(git hash-object packages/cli/src/ui/contexts/BackgroundTaskViewContext.tsx)" = 'af694374c8951d828fa64b5217fcb9a747126644'
           git diff HEAD --exit-code
@@ -66,7 +66,7 @@ jobs:
         run: |
           test -d source/.git
           cd source
-          test "$(git rev-parse HEAD)" = '832cefcd774c96f7709955accb541db5c1be4c84'
-          test "$(git rev-parse HEAD^{tree})" = '260e91562f1c0f45a7ca881d9b50c8baa579e5d8'
+          test "$(git rev-parse HEAD)" = 'a5e19396267497fbb3f4d2ed3ed3e893ed98df8e'
+          test "$(git rev-parse HEAD^{tree})" = '7996e3c5094c2a14e45f08d2f8100dac1789ceb6'
           git diff HEAD --exit-code
           echo DIAGNOSTIC_SOURCE_UNCHANGED
