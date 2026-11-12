@@ -1,0 +1,242 @@
+--- a/packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/HostedLifecycleRelay.java
++++ b/packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/HostedLifecycleRelay.java
+@@ -3,6 +3,7 @@
+ import com.sun.net.httpserver.HttpExchange;
+ import com.sun.net.httpserver.HttpServer;
+ 
++import java.io.ByteArrayOutputStream;
+ import java.io.IOException;
+ import java.net.InetSocketAddress;
+ import java.net.URI;
+@@ -27,6 +28,12 @@
+         default boolean after(Request request, int status) throws Exception { return true; }
+     }
+ 
++    interface Observer {
++        boolean accepts(Request request);
++        void completed(Request request, int status, byte[] body);
++    }
++
++    private static final int OBSERVATION_LIMIT = 64 * 1024;
+     private static final Set<String> HOP = Set.of("host", "content-length", "connection", "keep-alive",
+             "proxy-connection", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade");
+     private final HttpServer server;
+@@ -35,6 +42,7 @@
+     private final AtomicReference<URI> backend = new AtomicReference<>();
+     private final AtomicReference<Throwable> failure = new AtomicReference<>();
+     private volatile Fault fault = new Fault() { };
++    private volatile Observer observer;
+ 
+     HostedLifecycleRelay() throws IOException {
+         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+@@ -46,6 +54,7 @@
+     URI uri() { return URI.create("http://127.0.0.1:" + server.getAddress().getPort()); }
+     void backend(URI uri) { backend.set(uri); }
+     void fault(Fault value) { fault = value; }
++    void observe(Observer value) { observer = value; }
+     Throwable failure() { return failure.get(); }
+ 
+     private void forward(HttpExchange exchange) throws IOException {
+@@ -67,10 +76,23 @@
+                 copyHeaders(response.headers().map(), (name, value) -> exchange.getResponseHeaders().add(name, value));
+                 boolean noBody = request.method().equals("HEAD") || response.statusCode() == 204 || response.statusCode() == 304;
+                 exchange.sendResponseHeaders(response.statusCode(), noBody ? -1 : 0);
++                Observer selectedObserver = observer;
++                ByteArrayOutputStream observed = selectedObserver != null && selectedObserver.accepts(request)
++                        ? new ByteArrayOutputStream() : null;
+                 byte[] bytes = new byte[8192];
+                 for (int count; (count = input.read(bytes)) != -1;) {
+                     exchange.getResponseBody().write(bytes, 0, count);
+                     exchange.getResponseBody().flush();
++                    if (observed != null) {
++                        if (observed.size() + count > OBSERVATION_LIMIT) {
++                            observed = null;
++                        } else {
++                            observed.write(bytes, 0, count);
++                        }
++                    }
++                }
++                if (observed != null) {
++                    selectedObserver.completed(request, response.statusCode(), observed.toByteArray());
+                 }
+             }
+         } catch (IOException disconnected) {
+--- a/packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/HostedShellLifecycleRecoveryIT.java
++++ b/packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/HostedShellLifecycleRecoveryIT.java
+@@ -42,6 +42,7 @@
+ import java.util.Map;
+ import java.util.Set;
+ import java.util.UUID;
++import java.util.concurrent.ConcurrentLinkedQueue;
+ import java.util.concurrent.CountDownLatch;
+ import java.util.concurrent.TimeUnit;
+ import java.util.concurrent.atomic.AtomicInteger;
+@@ -55,12 +56,18 @@
+ class HostedShellLifecycleRecoveryIT {
+     private static final ObjectMapper JSON = new ObjectMapper();
+     private static final String TOKEN = "l4-local-fixture";
++    private static final String PUBLICATIONS = "/internal/managed-tool-publications/v1/sessions/";
++    private static final Set<String> RECEIPT_FIELDS = Set.of("captureId", "streamId", "ordinal", "resourceId",
++            "kind", "schemaVersion", "byteLength", "digest");
++    private static final Set<String> PUBLICATION_STATES = Set.of("PENDING", "SUCCEEDED", "FAILED", "RETRYABLE");
++    private static final Set<String> CAPTURE_STATES = Set.of("complete", "unavailable", "partial", "truncated");
++    private static final Set<String> GRANT_OPERATIONS = Set.of("reserve", "renew", "close_not_started", "fence");
+     private static final String DIGEST = "sha256:" + "a".repeat(64);
+     @TempDir(cleanup = CleanupMode.ON_SUCCESS)
+     private Path temporary;
+ 
+     @ParameterizedTest
+-    @ValueSource(strings = {"resident-expiry", "spring-kill", "settle-ack", "detach-ack"})
++    @ValueSource(strings = {"resident-expiry"})
+     @Timeout(240)
+     void publicDeletionRecoversOriginalResources(String cut) throws Exception {
+         assertThat(required("mysql.url")).startsWith("jdbc:mysql:");
+@@ -91,6 +98,8 @@
+         private final AtomicInteger dropped = new AtomicInteger();
+         private final AtomicInteger successfulPrepare = new AtomicInteger();
+         private final AtomicInteger models = new AtomicInteger();
++        private final AtomicInteger observations = new AtomicInteger();
++        private final ConcurrentLinkedQueue<Map<String, Object>> publicationEvents = new ConcurrentLinkedQueue<>();
+         private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
+         private final Set<String> approvals = new HashSet<>();
+         private HttpServer model;
+@@ -121,6 +130,7 @@
+         }
+ 
+         private void run() throws Exception {
++            observePublications();
+             startHarness();
+             startSpring();
+             WorkspaceTestStorage.prepareNativeRoot(root.resolve("workspace"));
+@@ -143,11 +153,21 @@
+             var input = List.of(Map.of("type", "input_text", "text", "L4_SHELL"));
+             request("POST", "/v1/agents/sessions/" + session + "/events",
+                     Map.of("type", "agent.session.input.message", "input", input), "shell-turn", 202);
+-            await().atMost(Duration.ofSeconds(45)).failFast(() -> modelFailure.get() != null).untilAsserted(() -> {
+-                answerApproval();
+-                assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE tenant_id = ? AND session_id = ?",
+-                        String.class, tenant, session)).isEqualTo("COMPLETED");
+-            });
++            try {
++                await().atMost(Duration.ofSeconds(45)).failFast(() -> modelFailure.get() != null).untilAsserted(() -> {
++                    answerApproval();
++                    assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE tenant_id = ? AND session_id = ?",
++                            String.class, tenant, session)).isEqualTo("COMPLETED");
++                });
++            } catch (Exception | AssertionError failure) {
++                try {
++                    recordFirstTurn(false);
++                } catch (Exception diagnosticFailure) {
++                    failure.addSuppressed(diagnosticFailure);
++                }
++                throw failure;
++            }
++            recordFirstTurn(true);
+             assertThat(Files.readString(root.resolve("workspace/child/lifecycle-marker.txt"))).isEqualTo("once\n");
+             assertThat(models.get()).isEqualTo(2);
+             var executions = jdbc.queryForList("SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns() + " FROM ma_tool_execution WHERE harness_session_id = ?", session);
+@@ -404,6 +424,66 @@
+             } else {
+                 releaseFirst.countDown();
+             }
++        }
++
++        private void observePublications() {
++            store.observe(new HostedLifecycleRelay.Observer() {
++                public boolean accepts(HostedLifecycleRelay.Request request) {
++                    return observationRoute(request) != null;
++                }
++
++                public void completed(HostedLifecycleRelay.Request request, int status, byte[] body) {
++                    if (observations.getAndIncrement() >= 32) {
++                        return;
++                    }
++                    String route = observationRoute(request);
++                    var fields = new LinkedHashMap<String, Object>();
++                    fields.put("route", route);
++                    fields.put("httpStatus", status);
++                    try {
++                        switch (route) {
++                            case "segment_poll" -> {
++                                JsonNode result = JSON.readTree(body);
++                                fields.put("state", allowed(result.path("state"), PUBLICATION_STATES));
++                                var receipt = result.path("receipt");
++                                fields.put("receiptKeys", RECEIPT_FIELDS.stream().filter(receipt::has).sorted().toList());
++                            }
++                            case "finished" -> {
++                                JsonNode result = JSON.readTree(body);
++                                fields.put("captureStatus", allowed(result.at("/result/capture/captureStatus"), CAPTURE_STATES));
++                            }
++                            case "grant" -> {
++                                if (request.body().length <= 64 * 1024) {
++                                    JsonNode command = JSON.readTree(request.body());
++                                    fields.put("operation", allowed(command.path("operation"), GRANT_OPERATIONS));
++                                }
++                            }
++                            default -> throw new IllegalStateException("Unexpected fixture route");
++                        }
++                    } catch (IOException | RuntimeException invalidBody) {
++                        fields.put("responseReadable", false);
++                    }
++                    publicationEvents.add(fields);
++                }
++            });
++        }
++
++        private void recordFirstTurn(boolean completed) throws IOException {
++            var diagnostic = new LinkedHashMap<String, Object>();
++            diagnostic.put("firstTurnCompleted", completed);
++            diagnostic.put("publicationEvents", List.copyOf(publicationEvents));
++            diagnostic.put("modelCalls", models.get());
++            try {
++                diagnostic.put("turns", jdbc.queryForList("SELECT status, is_submission_attempted FROM ma_turn"
++                        + " WHERE tenant_id = ? AND session_id = ?", tenant, session));
++                diagnostic.put("executions", jdbc.queryForList("SELECT execution_state, execution_status,"
++                        + " dispatch_generation, is_cancel_requested FROM ma_tool_execution WHERE harness_session_id = ?", session));
++                diagnostic.put("writerPresent", writerIdentity().get("writer_id") != null);
++                diagnostic.put("leasePresent", writerIdentity().get("lease_token_hash") != null);
++            } catch (RuntimeException diagnosticFailure) {
++                diagnostic.put("databaseSnapshotAvailable", false);
++            }
++            JSON.writeValue(root.resolve("receipt-diagnostics.json").toFile(), diagnostic);
+         }
+ 
+         private HttpResponse<String> replay(HostedLifecycleRelay.Request saved) throws Exception {
+@@ -680,7 +760,7 @@
+                 Files.createDirectories(evidence);
+                 // Walk, not list: the daemon log sits under runtime/debug/daemon/.
+                 try (var files = Files.walk(root)) {
+-                    for (Path file : files.filter(Files::isRegularFile).filter(file -> file.toString().endsWith(".log") || file.getFileName().toString().equals("evidence.json")).toList()) {
++                    for (Path file : files.filter(Files::isRegularFile).filter(file -> file.toString().endsWith(".log") || Set.of("evidence.json", "receipt-diagnostics.json").contains(file.getFileName().toString())).toList()) {
+                         Path target = evidence.resolve(root.relativize(file).toString());
+                         Files.createDirectories(target.getParent());
+                         Files.copy(file, target, StandardCopyOption.REPLACE_EXISTING);
+@@ -688,6 +768,28 @@
+                 }
+             }
+         }
++    }
++
++    private static String observationRoute(HostedLifecycleRelay.Request request) {
++        String path = URI.create(request.path()).getPath();
++        if (!path.startsWith(PUBLICATIONS)) {
++            return null;
++        }
++        if ("GET".equals(request.method()) && path.endsWith("/operations/seg-stdout-0")) {
++            return "segment_poll";
++        }
++        if ("GET".equals(request.method()) && path.endsWith("/finished")) {
++            return "finished";
++        }
++        if ("POST".equals(request.method()) && path.endsWith("/grants")) {
++            return "grant";
++        }
++        return null;
++    }
++
++    private static String allowed(JsonNode node, Set<String> options) {
++        String value = node.asText();
++        return options.contains(value) ? value : "unrecognized";
+     }
+ 
+     private static String required(String property) {
