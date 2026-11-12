@@ -1,0 +1,115 @@
+--- a/packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ToolPublicationAsyncVerificationTest.java
++++ b/packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ToolPublicationAsyncVerificationTest.java
+@@ -799,6 +799,112 @@
+                 .isEqualTo(ToolPublicationContract.sha256(bytes));
+     }
+ 
++    @ParameterizedTest
++    @ValueSource(strings = {"stdout", "stderr"})
++    void asyncSegmentReceiptNamesTheOriginalCaptureStreamAndOrdinal(String stream) {
++        byte[] bytes = (stream + "-receipt").getBytes(StandardCharsets.UTF_8);
++        String digest = ToolPublicationContract.sha256(bytes);
++        assertThat(data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "observed", stream, 0, bytes, digest)
++                .path("state").asText()).isEqualTo("PENDING");
++        data = replacement();
++        assertThat(data.verifyNextOperation()).isTrue();
++        JsonNode current = status("observed");
++        assertThat(current.path("state").asText()).isEqualTo("SUCCEEDED");
++        int reads = bucket.opens.get();
++        assertThat(data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "observed", stream, 0, bytes, digest))
++                .isEqualTo(current);
++        JsonNode alias = data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "alternate", stream, 0, bytes, digest);
++        assertThat(alias.path("state").asText()).isEqualTo("SUCCEEDED");
++        JsonNode expected = segmentReceipt(stream, bytes);
++        assertThat(alias.path("receipt")).isEqualTo(expected);
++        assertThat(bucket.opens).hasValue(reads);
++        assertThat(current.path("receipt")).isEqualTo(expected);
++    }
++
++    @Test
++    void seededLegacySucceededReceiptSurvivesReplacementAndOriginalReplay() {
++        byte[] bytes = "legacy-receipt".getBytes(StandardCharsets.UTF_8);
++        String digest = ToolPublicationContract.sha256(bytes);
++        assertThat(publish("legacy", 0, "legacy-receipt").path("state").asText()).isEqualTo("PENDING");
++        assertThat(data.verifyNextOperation()).isTrue();
++        String slot = "segment:stdout:0";
++        String resource = fixture.jdbc.queryForObject("SELECT resource_id FROM ma_resource WHERE slot_key = ?",
++                String.class, slot);
++        String kind = fixture.jdbc.queryForObject("SELECT kind FROM ma_resource WHERE slot_key = ?", String.class, slot);
++        assertThat(kind).isEqualTo("managed-tool-segment");
++        assertThat(resource).startsWith("capture-segment-");
++        JsonNode legacy = JSON.createObjectNode().put("resourceId", resource).put("kind", kind)
++                .put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
++        assertThat(fixture.jdbc.update("UPDATE ma_operation SET result_json = ? "
++                + "WHERE operation_id = X'6c6567616379' AND state = 'SUCCEEDED'", legacy.toString())).isEqualTo(1);
++        data = replacement();
++        int reads = bucket.opens.get();
++        JsonNode current = status("legacy");
++        assertThat(current.path("state").asText()).isEqualTo("SUCCEEDED");
++        assertThat(current.path("receipt")).isEqualTo(legacy);
++        assertThat(publish("legacy", 0, "legacy-receipt")).isEqualTo(current);
++        assertThat(publish("legacy-alias", 0, "legacy-receipt").path("receipt"))
++                .isEqualTo(segmentReceipt("stdout", bytes));
++        assertThatThrownBy(() -> status("legacy-alias"))
++                .isInstanceOf(ManagedAgentException.class).hasMessageContaining("operation is unknown");
++        assertThatThrownBy(() -> publish("legacy", 0, "changed")).hasMessageContaining("operation conflicts");
++        assertThatThrownBy(() -> publish("wrong-alias", 0, "changed")).hasMessageContaining("slot conflicts");
++        assertThat(bucket.opens).hasValue(reads);
++    }
++
++    @ParameterizedTest
++    @ValueSource(ints = {10, 70000})
++    void durableContentKeepsResourceReceiptAndExactReplay(int length) {
++        byte[] bytes = new byte[length];
++        String kind = "managed-tool-result-content";
++        String slot = "content:receipt-probe";
++        assertThat(data.publishResource(key, "pub-1", PUBLICATION_TOKEN, "content", slot, kind, bytes)
++                .path("state").asText()).isEqualTo("PENDING");
++        assertThat(data.verifyNextOperation()).isTrue();
++        JsonNode current = status("content");
++        assertThat(current.path("state").asText()).isEqualTo("SUCCEEDED");
++        JsonNode receipt = current.path("receipt");
++        assertThat(receipt.path("resourceId").asText()).startsWith("result-");
++        assertThat(receipt).isEqualTo(JSON.createObjectNode().put("resourceId", receipt.path("resourceId").asText())
++                .put("kind", kind).put("schemaVersion", 1).put("byteLength", length)
++                .put("digest", ToolPublicationContract.sha256(bytes)));
++        assertThat(data.publishResource(key, "pub-1", PUBLICATION_TOKEN, "content", slot, kind, bytes))
++                .isEqualTo(current);
++    }
++
++    @Test
++    void sealAndPageKeepTheirOwnReceiptShapes() {
++        byte[] bytes = "page-bytes".getBytes(StandardCharsets.UTF_8);
++        String digest = ToolPublicationContract.sha256(bytes);
++        assertThat(publish("page-segment", 0, "page-bytes").path("state").asText()).isEqualTo("PENDING");
++        assertThat(data.verifyNextOperation()).isTrue();
++        assertThat(data.seal(key, "pub-1", PUBLICATION_TOKEN, "page-seal", "stdout", 1, bytes.length, digest)
++                .path("state").asText()).isEqualTo("PENDING");
++        assertThat(data.verifyNextOperation()).isTrue();
++        assertThat(status("page-seal").path("receipt")).isEqualTo(
++                JSON.createObjectNode().put("segmentCount", 1).put("byteLength", bytes.length).put("digest", digest));
++        ObjectNode page = JSON.createObjectNode().put("toolResult", "managed-tool-result/1")
++                .put("type", "page").put("captureId", "capture-1").put("streamId", "stdout")
++                .put("firstOrdinal", 0).put("offset", 0);
++        page.putArray("segments").add(JSON.createObjectNode().put("byteLength", bytes.length).put("digest", digest));
++        byte[] pageBytes = page.toString().getBytes(StandardCharsets.UTF_8);
++        String pageKind = "managed-tool-result-page";
++        assertThat(data.publishResource(key, "pub-1", PUBLICATION_TOKEN, "page", "page:stdout:0", pageKind, pageBytes)
++                .path("state").asText()).isEqualTo("PENDING");
++        assertThat(data.verifyNextOperation()).isTrue();
++        JsonNode receipt = status("page").path("receipt");
++        assertThat(receipt.path("resourceId").asText()).startsWith("result-");
++        assertThat(receipt).isEqualTo(JSON.createObjectNode().put("resourceId", receipt.path("resourceId").asText())
++                .put("kind", pageKind).put("schemaVersion", 1).put("byteLength", pageBytes.length)
++                .put("digest", ToolPublicationContract.sha256(pageBytes)));
++    }
++
++    private JsonNode segmentReceipt(String stream, byte[] bytes) {
++        return JSON.createObjectNode().put("captureId", fixture.binding.path("captureId").asText())
++                .put("streamId", stream).put("ordinal", 0).put("byteLength", bytes.length)
++                .put("digest", ToolPublicationContract.sha256(bytes));
++    }
++
+     @Test
+     void historicalReplayDoesNotReadAndAnotherIdForTheSameSlotCompletesDirectly() {
+         publish("original", 0, "bytes");
