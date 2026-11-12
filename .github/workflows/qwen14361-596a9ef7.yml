@@ -8,14 +8,12 @@ jobs:
   diagnostics:
     if: github.repository == 'GoldArowana/qwen-code'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 35
     env:
       SOURCE_REPO: QwenLM/qwen-code
       SOURCE_SHA: acc07c2eb0f55d71e6402c5ebec33476c6268c90
       SOURCE_TREE: c66c93a507dfb9cdab5a3088bea6906dfc434046
       MYSQL_PASSWORD: hosted-fixture
-      FIXTURE: packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ToolPublicationAsyncVerificationTest.java
-      METHODS: asyncSegmentReceiptNamesTheOriginalCaptureStreamAndOrdinal+seededLegacySucceededReceiptSurvivesReplacementAndOriginalReplay+durableContentKeepsResourceReceiptAndExactReplay+sealAndPageKeepTheirOwnReceiptShapes+historicalReplayDoesNotReadAndAnotherIdForTheSameSlotCompletesDirectly
     services:
       mysql:
         image: mysql:8.4.6
@@ -83,56 +81,9 @@ jobs:
           [[ "$version" = 8.4.6* ]]
           docker exec -e MYSQL_PWD "$mysql_container" mysql -uroot -e 'CREATE DATABASE qwen_receipt_probe; DROP DATABASE qwen_receipt_probe;'
           printf 'MySQL %s; isolated fixture schema permissions verified\n' "$version"
-      - name: Apply the separately recorded test-only fixture
-        id: fixture
-        working-directory: source
-        run: |
-          set -euo pipefail
-          patch="$GITHUB_WORKSPACE/harness/.github/diagnostics/qwen14361-596a9ef7/receipt-probes.patch"
-          sha256sum "$patch"
-          test "$(git hash-object "$FIXTURE")" = 25cc18df5f78ac51d44c29389dd891b53c0882e0
-          git diff HEAD --exit-code
-          git apply --check "$patch"
-          git apply "$patch"
-          test "$(git diff HEAD --name-only)" = "$FIXTURE"
-          git diff --check
-      - name: Observe H2 receipts and controls
-        working-directory: source/packages/managed-agent-server
-        run: mvn --batch-mode --no-transfer-progress "-Dtest=ToolPublicationAsyncVerificationTest#$METHODS" test
-      - name: Preserve the original H2 report
-        if: "!cancelled() && steps.fixture.outcome == 'success'"
-        run: |
-          mkdir -p "$RUNNER_TEMP/qwen-h2"
-          find source/packages/managed-agent-server/verification/target/surefire-reports -maxdepth 1 \
-            -name 'TEST-*.ToolPublicationAsyncVerificationTest.xml' -exec cp -t "$RUNNER_TEMP/qwen-h2" -- {} +
-      - name: Observe MySQL receipts and controls
-        if: "!cancelled() && steps.fixture.outcome == 'success' && steps.mysql.outcome == 'success'"
-        working-directory: source/packages/managed-agent-server
-        env:
-          MYSQL_PORT: '${{ job.services.mysql.ports[3306] }}'
-        run: |
-          mvn --batch-mode --no-transfer-progress -Pmysql-integration \
-            '-Dtest=ToolPublicationAsyncVerificationTest#historicalReplayDoesNotReadAndAnotherIdForTheSameSlotCompletesDirectly' \
-            "-Dit.test=ToolPublicationAsyncVerificationMySqlIT#$METHODS" \
-            "-Dmysql.url=jdbc:mysql://127.0.0.1:$MYSQL_PORT/hosted_harness_test?allowPublicKeyRetrieval=true&useSSL=false" \
-            -Dmysql.user=root "-Dmysql.password=$MYSQL_PASSWORD" verify
-      - name: Restore exact source before the Hosted control
-        id: restore
-        if: "always() && steps.source.outcome == 'success'"
-        working-directory: source
-        run: |
-          set -euo pipefail
-          if ! git diff HEAD --exit-code -- "$FIXTURE"; then
-            patch="$GITHUB_WORKSPACE/harness/.github/diagnostics/qwen14361-596a9ef7/receipt-probes.patch"
-            test "$(git diff HEAD --name-only)" = "$FIXTURE"
-            git apply --check --reverse "$patch"
-            git apply --reverse "$patch"
-          fi
-          git diff HEAD --exit-code
-          test "$(git hash-object "$FIXTURE")" = 25cc18df5f78ac51d44c29389dd891b53c0882e0
       - name: Set up Node 22 for Hosted
         id: node
-        if: "!cancelled() && steps.restore.outcome == 'success' && steps.sdk.outcome == 'success' && steps.mysql.outcome == 'success'"
+        if: "!cancelled() && steps.sdk.outcome == 'success' && steps.mysql.outcome == 'success'"
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version: '22'
@@ -163,6 +114,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 "$GITHUB_WORKSPACE/harness/.github/diagnostics/qwen14361-596a9ef7/report.py"
+          python3 "$GITHUB_WORKSPACE/harness/.github/diagnostics/qwen14361-596a9ef7/collect-hosted.py"
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           test "$(git rev-parse 'HEAD^{tree}')" = "$SOURCE_TREE"
           git diff HEAD --exit-code
