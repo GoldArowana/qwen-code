@@ -1,4 +1,4 @@
-name: Qwen managed Shell paired receipts 2d9d8bda
+name: Qwen managed Shell unmodified Hosted 2d9d8bda
 on:
   push:
     branches: ['codex-ci/qwen14361-2d9d8bda']
@@ -8,7 +8,7 @@ jobs:
   diagnostics:
     if: github.repository == 'GoldArowana/qwen-code'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 36
     env:
       SOURCE_REPO: QwenLM/qwen-code
       SOURCE_SHA: 70a487be84b2a14daae21b9c2369b0ad243646dd
@@ -43,7 +43,7 @@ jobs:
           git diff HEAD --exit-code
           test "$(git -C "$GITHUB_WORKSPACE/harness" rev-parse HEAD)" = "$GITHUB_SHA"
           printf 'Source %s %s %s; separate event %s\n' "$SOURCE_REPO" "$SOURCE_SHA" "$SOURCE_TREE" "$GITHUB_SHA"
-          (cd "$fixtures" && sha256sum -c patches.sha256)
+          printf '%s  %s\n' "30c0e3bea378a9a5280b95415da84fdb34a628d919a88ee00b83c82e0286c24b" "$fixtures/serializer.patch" | sha256sum -c -
       - name: Set up JDK 21
         uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654
         with:
@@ -61,12 +61,6 @@ jobs:
             "-Dmaven.repo.local=$RUNNER_TEMP/qwen-m2" --batch-mode --no-transfer-progress \
             -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
           git diff HEAD --exit-code
-      - name: Run both focused H2 arms
-        id: h2
-        working-directory: source
-        env:
-          MYSQL_PORT: '0'
-        run: bash "$FIXTURE_ROOT/run-pair.sh" h2
       - name: Start disposable local MySQL and verify schema prerequisites
         id: mysql
         if: "!cancelled() && steps.sdk.outcome == 'success'"
@@ -94,38 +88,10 @@ jobs:
           read -r version aio binlog < "$RUNNER_TEMP/qwen-reports/mysql-version-settings.tsv"
           [[ "$version" = 8.4.6 && "$aio" = 0 && "$binlog" = 0 ]]
           docker exec -e MYSQL_PWD="$MYSQL_PASSWORD" "$container" mysql -uroot -e \
-            'CREATE DATABASE qwen_mysql_base; CREATE DATABASE qwen_mysql_variant; CREATE DATABASE qwen_hosted_base; CREATE DATABASE qwen_hosted_variant;'
-      - name: Run both focused MySQL arms
-        id: paired_mysql
-        if: "!cancelled() && steps.mysql.outcome == 'success'"
-        working-directory: source
-        run: bash "$FIXTURE_ROOT/run-pair.sh" mysql
-      - name: Run Managed Agent Server Checkstyle on the serializer variant
-        id: checkstyle
-        if: "!cancelled() && steps.sdk.outcome == 'success'"
-        working-directory: source
-        env:
-          MYSQL_PORT: '0'
-        run: bash "$FIXTURE_ROOT/run-pair.sh" checkstyle
-      - name: Classify and preserve the database result before Hosted
-        if: "!cancelled() && steps.identity.outcome == 'success'"
-        run: python3 "$FIXTURE_ROOT/report.py" --summarize "$RUNNER_TEMP/qwen-reports" --database-only
-      - name: Upload focused database evidence
-        if: "!cancelled() && steps.identity.outcome == 'success'"
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: qwen-database-receipts-2d9d8bda
-          path: |
-            ${{ runner.temp }}/qwen-reports/database-summary.json
-            ${{ runner.temp }}/qwen-reports/mysql-version-settings.tsv
-            ${{ runner.temp }}/qwen-reports/h2
-            ${{ runner.temp }}/qwen-reports/mysql
-            ${{ runner.temp }}/qwen-reports/checkstyle
-          if-no-files-found: error
-          retention-days: 7
+            'CREATE DATABASE qwen_hosted_clean;'
       - name: Set up Node 22 for Hosted
         id: node
-        if: "!cancelled() && steps.paired_mysql.outcome == 'success'"
+        if: "!cancelled() && steps.mysql.outcome == 'success'"
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version: '22'
@@ -143,10 +109,11 @@ jobs:
           test -s dist/cli.js
           node --version
           git diff HEAD --exit-code
-      - name: Run both resident-expiry Hosted arms
+      - name: Run original four-case Hosted lifecycle with serializer-only variant
+        id: original_hosted
         if: "!cancelled() && steps.cli.outcome == 'success'"
         working-directory: source
-        run: bash "$FIXTURE_ROOT/run-pair.sh" hosted
+        run: bash "$FIXTURE_ROOT/run-clean-hosted.sh"
       - name: Verify final exact upstream source and clean tracked bytes
         if: "always() && steps.source.outcome == 'success'"
         working-directory: source
@@ -159,18 +126,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/qwen-reports"
           printf 'Source %s %s %s; separate event %s\n' "$SOURCE_REPO" "$SOURCE_SHA" "$SOURCE_TREE" "$GITHUB_SHA" \
             | tee "$RUNNER_TEMP/qwen-reports/final-source-identity.txt"
-      - name: Classify the paired receipts and report both Hosted outcomes
-        if: "always() && steps.identity.outcome == 'success'"
-        run: python3 "$FIXTURE_ROOT/report.py" --summarize "$RUNNER_TEMP/qwen-reports"
       - name: Preserve focused test reports
         if: "always() && steps.identity.outcome == 'success'"
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: qwen-hosted-receipts-2d9d8bda
-          path: |
-            ${{ runner.temp }}/qwen-reports/paired-summary.json
-            ${{ runner.temp }}/qwen-reports/final-source-identity.txt
-            ${{ runner.temp }}/qwen-reports/hosted
+          name: qwen-unmodified-hosted-2d9d8bda
+          path: '${{ runner.temp }}/qwen-reports'
           if-no-files-found: error
           retention-days: 7
       - name: Stop the task-owned MySQL container
