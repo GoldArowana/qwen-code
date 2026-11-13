@@ -1,0 +1,11 @@
+--- a/packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ToolPublicationDataStore.java
++++ b/packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ToolPublicationDataStore.java
+@@ -1774,7 +1774,7 @@
+ 
+     private JsonNode receipt(JsonNode binding, String slot, String resourceId, String kind, int length, String digest) {
+         ObjectNode result = JSON.createObjectNode();
+-        if (kind != null) {
++        if (!slot.startsWith("segment:")) {
+             return result.put("resourceId", resourceId).put("kind", kind)
+                     .put("schemaVersion", 1).put("byteLength", length).put("digest", digest);
+         }

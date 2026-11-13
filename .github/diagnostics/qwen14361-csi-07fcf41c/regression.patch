@@ -1,0 +1,29 @@
+--- a/packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ToolPublicationAsyncVerificationTest.java
++++ b/packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ToolPublicationAsyncVerificationTest.java
+@@ -799,6 +799,26 @@
+                 .isEqualTo(ToolPublicationContract.sha256(bytes));
+     }
+ 
++    @ParameterizedTest
++    @ValueSource(strings = {"stdout", "stderr"})
++    void asyncSegmentReceiptRetainsCaptureIdentityOnExactReplay(String stream) {
++        byte[] bytes = "captured bytes".getBytes(StandardCharsets.UTF_8);
++        String digest = ToolPublicationContract.sha256(bytes);
++        String operation = "seg-" + stream + "-0";
++        assertThat(data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, operation, stream, 0, bytes, digest)
++                .path("state").asText()).isEqualTo("PENDING");
++        assertThat(data.verifyNextOperation()).isTrue();
++
++        JsonNode status = status(operation);
++        assertThat(status.path("state").asText()).isEqualTo("SUCCEEDED");
++        assertThat(status.path("receipt")).isEqualTo(JSON.createObjectNode()
++                .put("captureId", fixture.binding.path("captureId").asText())
++                .put("streamId", stream).put("ordinal", 0).put("byteLength", bytes.length)
++                .put("digest", digest));
++        assertThat(data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, operation, stream, 0, bytes, digest))
++                .isEqualTo(status);
++    }
++
+     @Test
+     void historicalReplayDoesNotReadAndAnotherIdForTheSameSlotCompletesDirectly() {
+         publish("original", 0, "bytes");

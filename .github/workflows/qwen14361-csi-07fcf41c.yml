@@ -1,0 +1,159 @@
+name: Qwen managed Shell settled upgrade 07fcf41c
+on:
+  push:
+    branches: ['codex-ci/qwen14361-csi-07fcf41c']
+permissions:
+  contents: read
+jobs:
+  diagnostics:
+    if: github.repository == 'GoldArowana/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 37
+    env:
+      SOURCE_REPO: QwenLM/qwen-code
+      SOURCE_SHA: 70a487be84b2a14daae21b9c2369b0ad243646dd
+      SOURCE_TREE: 3d32307b169d568cf2455b12f5778e3d3e91cb23
+      CANDIDATE_SHA: 985516234bb12e6a7b543906eb55b7349fc9e0e5
+      CANDIDATE_TREE: 2bfb3cb25e05c4f2b47bbdd4db8f6597773a1481
+      MYSQL_PASSWORD: qwen-local-disposable-fixture
+    steps:
+      - name: Read event fixtures
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          path: harness
+          ref: '${{ github.sha }}'
+          sparse-checkout: .github/diagnostics/qwen14361-csi-07fcf41c
+          persist-credentials: false
+      - name: Read exact upstream source
+        id: source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: '${{ env.SOURCE_REPO }}'
+          ref: '${{ env.SOURCE_SHA }}'
+          path: source
+          persist-credentials: false
+      - name: Verify separate source and fixture identities
+        id: identity
+        working-directory: source
+        run: |
+          set -euo pipefail
+          fixtures="$GITHUB_WORKSPACE/harness/.github/diagnostics/qwen14361-csi-07fcf41c"
+          echo "FIXTURE_ROOT=$fixtures" >> "$GITHUB_ENV"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$SOURCE_TREE"
+          test "$(git remote get-url origin)" = "https://github.com/$SOURCE_REPO"
+          git diff HEAD --exit-code
+          test "$(git -C "$GITHUB_WORKSPACE/harness" rev-parse HEAD)" = "$GITHUB_SHA"
+          printf 'Source %s %s %s; separate event %s\n' "$SOURCE_REPO" "$SOURCE_SHA" "$SOURCE_TREE" "$GITHUB_SHA"
+          cd "$fixtures"
+          sha256sum --strict -c inputs.sha256
+      - name: Set up JDK 21
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654
+        with:
+          distribution: temurin
+          java-version: '21'
+          settings-path: '${{ runner.temp }}/m2-settings'
+      - name: Bootstrap the exact sibling Java SDK once
+        id: sdk
+        working-directory: source
+        run: |
+          set -euo pipefail
+          java -version
+          mvn --version
+          mvn --settings "$RUNNER_TEMP/m2-settings/settings.xml" --toolchains "$RUNNER_TEMP/m2-settings/toolchains.xml" \
+            "-Dmaven.repo.local=$RUNNER_TEMP/qwen-m2" --batch-mode --no-transfer-progress \
+            -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
+          git diff HEAD --exit-code
+      - name: Start disposable local MySQL and verify schema prerequisites
+        id: mysql
+        if: "!cancelled() && steps.sdk.outcome == 'success'"
+        run: |
+          set -euo pipefail
+          container=qwen-receipts-"${GITHUB_RUN_ID}"-"${GITHUB_RUN_ATTEMPT}"
+          echo "MYSQL_CONTAINER=$container" >> "$GITHUB_ENV"
+          docker run --detach --name "$container" --publish '127.0.0.1::3306' \
+            --env MYSQL_ROOT_PASSWORD="$MYSQL_PASSWORD" --env MYSQL_ROOT_HOST='%' \
+            mysql:8.4.6 --innodb-use-native-aio=0 --skip-log-bin
+          for attempt in {1..60}; do
+            if docker exec -e MYSQL_PWD="$MYSQL_PASSWORD" "$container" mysql -uroot -NB -e 'SELECT VERSION()' >/dev/null 2>&1; then
+              break
+            fi
+            test "$attempt" -lt 60
+            sleep 2
+          done
+          port=$(docker port "$container" 3306/tcp | sed -n 's/^127\.0\.0\.1:\([0-9][0-9]*\)$/\1/p')
+          [[ "$port" =~ ^[0-9]+$ ]]
+          echo "MYSQL_PORT=$port" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/qwen-reports"
+          query='SELECT VERSION(), @@innodb_use_native_aio, @@log_bin'
+          docker exec -e MYSQL_PWD="$MYSQL_PASSWORD" "$container" mysql -uroot -NB -e "$query" \
+            | tee "$RUNNER_TEMP/qwen-reports/mysql-version-settings.tsv"
+          read -r version aio binlog < "$RUNNER_TEMP/qwen-reports/mysql-version-settings.tsv"
+          [[ "$version" = 8.4.6 && "$aio" = 0 && "$binlog" = 0 ]]
+          docker exec -e MYSQL_PWD="$MYSQL_PASSWORD" "$container" mysql -uroot -e \
+            'CREATE DATABASE qwen_csi_legacy; CREATE DATABASE qwen_csi_fresh;'
+      - name: Set up Node 22 for Hosted
+        id: node
+        if: "!cancelled() && steps.mysql.outcome == 'success'"
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Bootstrap the exact frozen CLI
+        id: cli
+        if: "!cancelled() && steps.node.outcome == 'success'"
+        working-directory: source
+        run: |
+          set -euo pipefail
+          corepack enable
+          unset QWEN_SKIP_PREPARE
+          # The upstream prepare script builds and bundles the CLI during this install.
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+          test -s dist/cli.js
+          node --version
+          git diff HEAD --exit-code
+      - name: Compare baseline and candidate async receipt regressions
+        id: focused
+        if: "!cancelled() && steps.cli.outcome == 'success'"
+        working-directory: source
+        run: bash "$FIXTURE_ROOT/run-csi-upgrade.sh" focused
+      - name: Persist real legacy CSI output then replay it in a different JVM
+        id: csi
+        if: "!cancelled() && steps.focused.outcome == 'success'"
+        working-directory: source
+        run: bash "$FIXTURE_ROOT/run-csi-upgrade.sh" restart
+      - name: Exercise built TypeScript capture with actual Java receipts
+        id: consumer
+        if: "!cancelled() && steps.csi.outcome == 'success'"
+        working-directory: source
+        run: |
+          set -euo pipefail
+          node "$FIXTURE_ROOT/replay-consumer.mjs" "$RUNNER_TEMP/qwen-reports" \
+            | tee "$RUNNER_TEMP/qwen-reports/consumer.json"
+      - name: Verify final exact upstream source and clean tracked bytes
+        if: "always() && steps.source.outcome == 'success'"
+        working-directory: source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$SOURCE_TREE"
+          test "$(git remote get-url origin)" = "https://github.com/$SOURCE_REPO"
+          git diff HEAD --exit-code
+          mkdir -p "$RUNNER_TEMP/qwen-reports"
+          printf 'Source %s %s %s; separate event %s\n' "$SOURCE_REPO" "$SOURCE_SHA" "$SOURCE_TREE" "$GITHUB_SHA" \
+            | tee "$RUNNER_TEMP/qwen-reports/final-source-identity.txt"
+      - name: Preserve focused test reports
+        if: "always() && steps.identity.outcome == 'success'"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: qwen-csi-upgrade-07fcf41c
+          path: '${{ runner.temp }}/qwen-reports'
+          if-no-files-found: error
+          retention-days: 7
+      - name: Stop the task-owned MySQL container
+        if: "always() && steps.mysql.outcome != 'skipped'"
+        run: |
+          set -euo pipefail
+          if [[ -n "${MYSQL_CONTAINER:-}" ]] && docker container inspect "$MYSQL_CONTAINER" >/dev/null 2>&1; then
+            docker rm -f "$MYSQL_CONTAINER"
+          fi
