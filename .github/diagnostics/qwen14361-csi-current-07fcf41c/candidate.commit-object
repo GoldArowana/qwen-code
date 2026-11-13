@@ -1,0 +1,8 @@
+tree 91aaf510efee79d6f4a91180abcc821d52c050f4
+parent 5b54fe642cc28799496bb8cd0bc1234e0dfb86ff
+author GoldArowana <27399349+GoldArowana@users.noreply.github.com> 1794530598 +0800
+committer GoldArowana <27399349+GoldArowana@users.noreply.github.com> 1794530598 +0800
+
+fix(managed-agent): serialize typed Shell segment receipts
+
+Refs #14361

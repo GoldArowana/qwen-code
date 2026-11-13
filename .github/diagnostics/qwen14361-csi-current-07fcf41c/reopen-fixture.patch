@@ -1,0 +1,13 @@
+--- a/packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/PublicationJournalFixture.java
++++ b/packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/PublicationJournalFixture.java
+@@ -96,6 +96,10 @@
+         store = newStore(10 * ALLOCATION, 10);
+     }
+ 
++    static PublicationJournalFixture reopenForCsiUpgrade(DataSource source) {
++        return new PublicationJournalFixture(source);
++    }
++
+     public static PublicationJournalFixture create(DataSource source) {
+         return create(source, null);
+     }
