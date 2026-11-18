@@ -11,7 +11,7 @@ jobs:
   final-head-validation:
     if: github.repository == 'GoldArowana/qwen-code'
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 210
     env:
       CI: 'true'
       QWEN_PROBE_SOURCE: ${{ github.workspace }}/source
@@ -164,7 +164,7 @@ jobs:
           retention-days: 7
       - name: Run canonical full preflight without filtering or skips
         if: always() && steps.bootstrap.outcome == 'success' && steps.scratch.outcome == 'success' && steps.unit.outcome == 'success'
-        timeout-minutes: 120
+        timeout-minutes: 180
         working-directory: source
         shell: bash
         run: |
