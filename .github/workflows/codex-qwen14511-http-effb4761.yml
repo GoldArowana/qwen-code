@@ -15,7 +15,7 @@ jobs:
     env:
       CI: 'true'
       QWEN_PROBE_SOURCE: ${{ github.workspace }}/source
-      QWEN_PROBE_SCRATCH: ${{ runner.temp }}/qwen14511-http-effb4761
+      QWEN_PROBE_SCRATCH: ${{ github.workspace }}/qwen14511-http-effb4761-scratch
       SOURCE_REPOSITORY: QwenLM/qwen-code
       SOURCE_COMMIT: 61476010ca7f46140eaa39c77952bd1b9109a587
       SOURCE_TREE: c231640f1b0dcec6b560fc3124cc493f4f8e2c2e
@@ -98,10 +98,10 @@ jobs:
         with:
           name: qwen14511-http-effb4761-baseline
           path: |
-            ${{ runner.temp }}/qwen14511-http-effb4761/*.json
-            ${{ runner.temp }}/qwen14511-http-effb4761/*.log
-            ${{ runner.temp }}/qwen14511-http-effb4761/*.exit
-            ${{ runner.temp }}/qwen14511-http-effb4761/*.xml
-            ${{ runner.temp }}/qwen14511-http-effb4761/*.ts
+            ${{ github.workspace }}/qwen14511-http-effb4761-scratch/*.json
+            ${{ github.workspace }}/qwen14511-http-effb4761-scratch/*.log
+            ${{ github.workspace }}/qwen14511-http-effb4761-scratch/*.exit
+            ${{ github.workspace }}/qwen14511-http-effb4761-scratch/*.xml
+            ${{ github.workspace }}/qwen14511-http-effb4761-scratch/*.ts
           if-no-files-found: warn
           retention-days: 7
