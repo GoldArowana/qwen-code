@@ -11,14 +11,14 @@ jobs:
   final-head-validation:
     if: github.repository == 'GoldArowana/qwen-code'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 150
     env:
       CI: 'true'
       QWEN_PROBE_SOURCE: ${{ github.workspace }}/source
       QWEN_PROBE_SCRATCH: ${{ github.workspace }}/qwen14511-http-effb4761-scratch
       SOURCE_REPOSITORY: GoldArowana/qwen-code
-      SOURCE_COMMIT: bd45cd4007a5c545c344fb3a36b3e1a073907eca
-      SOURCE_TREE: 3ca90b00bc0448a55f6332047b349ab98ed48fe7
+      SOURCE_COMMIT: 2bb8c46279c5d78aaca3b563d1580226d295ff3e
+      SOURCE_TREE: 810ce2c96a0ed61b144b7340fb02a465f4c9c50c
     steps:
       - name: Checkout validation harness
         uses: actions/checkout@v4
@@ -30,7 +30,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: GoldArowana/qwen-code
-          ref: bd45cd4007a5c545c344fb3a36b3e1a073907eca
+          ref: 2bb8c46279c5d78aaca3b563d1580226d295ff3e
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -42,8 +42,13 @@ jobs:
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
           test "$(git rev-parse HEAD^{tree})" = "$SOURCE_TREE"
           test "$(git remote get-url origin)" = "https://github.com/$SOURCE_REPOSITORY"
-          git diff HEAD --exit-code
           mkdir -p "$QWEN_PROBE_SCRATCH"
+          git rev-parse HEAD > "$QWEN_PROBE_SCRATCH/initial-head.log"
+          git rev-parse HEAD^{tree} > "$QWEN_PROBE_SCRATCH/initial-tree.log"
+          git diff HEAD --exit-code 2>&1 | tee "$QWEN_PROBE_SCRATCH/initial-source-diff.log"
+          printf '0\n' > "$QWEN_PROBE_SCRATCH/initial-source-diff.exit"
+          git status --porcelain=v1 --untracked-files=all | tee "$QWEN_PROBE_SCRATCH/initial-source-status.log"
+          test ! -s "$QWEN_PROBE_SCRATCH/initial-source-status.log"
           python3 - <<'PY'
           import json, os, pathlib
           report = {name: os.environ[name] for name in ['SOURCE_REPOSITORY', 'SOURCE_COMMIT', 'SOURCE_TREE', 'GITHUB_SHA', 'GITHUB_REPOSITORY', 'GITHUB_REF']}
@@ -125,8 +130,41 @@ jobs:
           npx --no-install tsx "$GITHUB_WORKSPACE/validation/.codex-validation/qwen14511-http-effb4761/cli-probe.ts" 2>&1 | tee "$QWEN_PROBE_SCRATCH/cli-probe.log" || status=$?
           printf '%s\n' "$status" > "$QWEN_PROBE_SCRATCH/cli-probe.exit"
           exit "$status"
+      - name: Verify exact source after targeted validation
+        if: always() && steps.bootstrap.outcome == 'success'
+        working-directory: source
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          git rev-parse HEAD > "$QWEN_PROBE_SCRATCH/targeted-head.log" || status=1
+          git rev-parse HEAD^{tree} > "$QWEN_PROBE_SCRATCH/targeted-tree.log" || status=1
+          test "$(cat "$QWEN_PROBE_SCRATCH/targeted-head.log")" = "$SOURCE_COMMIT" || status=1
+          test "$(cat "$QWEN_PROBE_SCRATCH/targeted-tree.log")" = "$SOURCE_TREE" || status=1
+          git diff HEAD --exit-code > "$QWEN_PROBE_SCRATCH/targeted-source-diff.log" 2>&1
+          diff_status=$?
+          printf '%s\n' "$diff_status" > "$QWEN_PROBE_SCRATCH/targeted-source-diff.exit"
+          test "$diff_status" -eq 0 || status=1
+          git status --porcelain=v1 --untracked-files=all > "$QWEN_PROBE_SCRATCH/targeted-source-status.log" || status=1
+          test ! -s "$QWEN_PROBE_SCRATCH/targeted-source-status.log" || status=1
+          printf '%s\n' "$status" > "$QWEN_PROBE_SCRATCH/targeted-source-integrity.exit"
+          exit "$status"
+      - name: Upload completed targeted evidence before canonical preflight
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwen14511-http-052ebd14-H2-targeted
+          path: |
+            ${{ github.workspace }}/qwen14511-http-effb4761-scratch/*.json
+            ${{ github.workspace }}/qwen14511-http-effb4761-scratch/*.log
+            ${{ github.workspace }}/qwen14511-http-effb4761-scratch/*.exit
+            ${{ github.workspace }}/qwen14511-http-effb4761-scratch/*.xml
+            ${{ github.workspace }}/qwen14511-http-effb4761-scratch/*.ts
+          if-no-files-found: warn
+          retention-days: 7
       - name: Run canonical full preflight without filtering or skips
         if: always() && steps.bootstrap.outcome == 'success' && steps.scratch.outcome == 'success' && steps.unit.outcome == 'success'
+        timeout-minutes: 120
         working-directory: source
         shell: bash
         run: |
@@ -140,16 +178,26 @@ jobs:
         working-directory: source
         shell: bash
         run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
-          test "$(git rev-parse HEAD^{tree})" = "$SOURCE_TREE"
-          git diff HEAD --exit-code 2>&1 | tee "$QWEN_PROBE_SCRATCH/final-source-diff.log"
-          printf '0\n' > "$QWEN_PROBE_SCRATCH/final-source-diff.exit"
+          set -uo pipefail
+          mkdir -p "$QWEN_PROBE_SCRATCH"
+          status=0
+          git rev-parse HEAD > "$QWEN_PROBE_SCRATCH/final-head.log" || status=1
+          git rev-parse HEAD^{tree} > "$QWEN_PROBE_SCRATCH/final-tree.log" || status=1
+          test "$(cat "$QWEN_PROBE_SCRATCH/final-head.log")" = "$SOURCE_COMMIT" || status=1
+          test "$(cat "$QWEN_PROBE_SCRATCH/final-tree.log")" = "$SOURCE_TREE" || status=1
+          git diff HEAD --exit-code > "$QWEN_PROBE_SCRATCH/final-source-diff.log" 2>&1
+          diff_status=$?
+          printf '%s\n' "$diff_status" > "$QWEN_PROBE_SCRATCH/final-source-diff.exit"
+          test "$diff_status" -eq 0 || status=1
+          git status --porcelain=v1 --untracked-files=all > "$QWEN_PROBE_SCRATCH/final-source-status.log" || status=1
+          test ! -s "$QWEN_PROBE_SCRATCH/final-source-status.log" || status=1
+          printf '%s\n' "$status" > "$QWEN_PROBE_SCRATCH/final-source-integrity.exit"
+          exit "$status"
       - name: Upload bounded test evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: qwen14511-http-effb4761-final
+          name: qwen14511-http-052ebd14-H2-final
           path: |
             ${{ github.workspace }}/qwen14511-http-effb4761-scratch/*.json
             ${{ github.workspace }}/qwen14511-http-effb4761-scratch/*.log
