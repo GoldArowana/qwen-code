@@ -8,17 +8,17 @@ concurrency:
   group: codex-qwen14511-http-effb4761-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  baseline-http:
+  final-head-validation:
     if: github.repository == 'GoldArowana/qwen-code'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     env:
       CI: 'true'
       QWEN_PROBE_SOURCE: ${{ github.workspace }}/source
       QWEN_PROBE_SCRATCH: ${{ github.workspace }}/qwen14511-http-effb4761-scratch
-      SOURCE_REPOSITORY: QwenLM/qwen-code
-      SOURCE_COMMIT: 61476010ca7f46140eaa39c77952bd1b9109a587
-      SOURCE_TREE: c231640f1b0dcec6b560fc3124cc493f4f8e2c2e
+      SOURCE_REPOSITORY: GoldArowana/qwen-code
+      SOURCE_COMMIT: bd45cd4007a5c545c344fb3a36b3e1a073907eca
+      SOURCE_TREE: 3ca90b00bc0448a55f6332047b349ab98ed48fe7
     steps:
       - name: Checkout validation harness
         uses: actions/checkout@v4
@@ -29,8 +29,8 @@ jobs:
       - name: Checkout exact source
         uses: actions/checkout@v4
         with:
-          repository: QwenLM/qwen-code
-          ref: 61476010ca7f46140eaa39c77952bd1b9109a587
+          repository: GoldArowana/qwen-code
+          ref: bd45cd4007a5c545c344fb3a36b3e1a073907eca
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -60,6 +60,7 @@ jobs:
           version: '11.24.0'
           run_install: false
       - name: Frozen normal dependency bootstrap including prepare build
+        id: bootstrap
         working-directory: source
         shell: bash
         run: |
@@ -74,6 +75,7 @@ jobs:
         shell: bash
         run: python3 validation/.codex-validation/qwen14511-http-effb4761/prepare-probe.py
       - name: Execute actual HTTP and local journal controls
+        id: scratch
         working-directory: source/packages/cli
         shell: bash
         run: |
@@ -81,6 +83,57 @@ jobs:
           status=0
           npx --no-install vitest run "$QWEN_PROBE_SCRATCH/command-operations.probe.test.ts" --config "$QWEN_PROBE_SCRATCH/probe.config.ts" 2>&1 | tee "$QWEN_PROBE_SCRATCH/http-probe.log" || status=$?
           printf '%s\n' "$status" > "$QWEN_PROBE_SCRATCH/http-probe.exit"
+          exit "$status"
+      - name: Run committed dedicated command-operation tests
+        id: unit
+        working-directory: source/packages/cli
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          npx --no-install vitest run src/serve/hosted-harness-command-operations.test.ts src/serve/hosted-session-command-session.test.ts 2>&1 | tee "$QWEN_PROBE_SCRATCH/committed-suite.log" || status=$?
+          printf '%s\n' "$status" > "$QWEN_PROBE_SCRATCH/committed-suite.exit"
+          exit "$status"
+      - name: Run normal repository typecheck
+        id: typecheck
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          npm run typecheck 2>&1 | tee "$QWEN_PROBE_SCRATCH/typecheck.log" || status=$?
+          printf '%s\n' "$status" > "$QWEN_PROBE_SCRATCH/typecheck.exit"
+          exit "$status"
+      - name: Build and bundle the actual candidate CLI
+        id: bundle
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          (npm run build && npm run bundle) 2>&1 | tee "$QWEN_PROBE_SCRATCH/build-bundle.log" || status=$?
+          printf '%s\n' "$status" > "$QWEN_PROBE_SCRATCH/build-bundle.exit"
+          git diff HEAD --exit-code
+          exit "$status"
+      - name: Verify current built CLI through local HTTP transport fixtures
+        id: cli
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          npx --no-install tsx "$GITHUB_WORKSPACE/validation/.codex-validation/qwen14511-http-effb4761/cli-probe.ts" 2>&1 | tee "$QWEN_PROBE_SCRATCH/cli-probe.log" || status=$?
+          printf '%s\n' "$status" > "$QWEN_PROBE_SCRATCH/cli-probe.exit"
+          exit "$status"
+      - name: Run canonical full preflight without filtering or skips
+        if: always() && steps.bootstrap.outcome == 'success' && steps.scratch.outcome == 'success' && steps.unit.outcome == 'success'
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          npm run preflight 2>&1 | tee "$QWEN_PROBE_SCRATCH/preflight.log" || status=$?
+          printf '%s\n' "$status" > "$QWEN_PROBE_SCRATCH/preflight.exit"
           exit "$status"
       - name: Always verify tested source tracked bytes and attribution
         if: always()
@@ -96,7 +149,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: qwen14511-http-effb4761-baseline
+          name: qwen14511-http-effb4761-final
           path: |
             ${{ github.workspace }}/qwen14511-http-effb4761-scratch/*.json
             ${{ github.workspace }}/qwen14511-http-effb4761-scratch/*.log
