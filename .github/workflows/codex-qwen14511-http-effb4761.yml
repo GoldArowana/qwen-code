@@ -1,0 +1,107 @@
+name: Codex Qwen14511 HTTP effb4761
+on:
+  push:
+    branches: [codex-ci/qwen14511-http-effb4761]
+permissions:
+  contents: read
+concurrency:
+  group: codex-qwen14511-http-effb4761-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  baseline-http:
+    if: github.repository == 'GoldArowana/qwen-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CI: 'true'
+      QWEN_PROBE_SOURCE: ${{ github.workspace }}/source
+      QWEN_PROBE_SCRATCH: ${{ runner.temp }}/qwen14511-http-effb4761
+      SOURCE_REPOSITORY: QwenLM/qwen-code
+      SOURCE_COMMIT: 61476010ca7f46140eaa39c77952bd1b9109a587
+      SOURCE_TREE: c231640f1b0dcec6b560fc3124cc493f4f8e2c2e
+    steps:
+      - name: Checkout validation harness
+        uses: actions/checkout@v4
+        with:
+          path: validation
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Checkout exact source
+        uses: actions/checkout@v4
+        with:
+          repository: QwenLM/qwen-code
+          ref: 61476010ca7f46140eaa39c77952bd1b9109a587
+          path: source
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Assert source attribution and clean tracked bytes
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(git rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          test "$(git remote get-url origin)" = "https://github.com/$SOURCE_REPOSITORY"
+          git diff HEAD --exit-code
+          mkdir -p "$QWEN_PROBE_SCRATCH"
+          python3 - <<'PY'
+          import json, os, pathlib
+          report = {name: os.environ[name] for name in ['SOURCE_REPOSITORY', 'SOURCE_COMMIT', 'SOURCE_TREE', 'GITHUB_SHA', 'GITHUB_REPOSITORY', 'GITHUB_REF']}
+          report['meaning'] = 'SOURCE_COMMIT/TREE identify tested upstream bytes; GITHUB_SHA identifies the independent validation harness event.'
+          pathlib.Path(os.environ['QWEN_PROBE_SCRATCH'], 'source-attribution.json').write_text(json.dumps(report, indent=2) + '\n')
+          PY
+      - name: Set up supported Node runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Set up exact pinned pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: '11.24.0'
+          run_install: false
+      - name: Frozen normal dependency bootstrap including prepare build
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version
+          npm --version
+          test "$(pnpm --version)" = '11.24.0'
+          node -e "const p=require('./package.json'); if(!p.packageManager.startsWith('pnpm@11.24.0+')) process.exit(1)"
+          pnpm install --frozen-lockfile 2>&1 | tee "$QWEN_PROBE_SCRATCH/bootstrap.log"
+          git diff HEAD --exit-code
+      - name: Prepare independent scratch HTTP test script
+        shell: bash
+        run: python3 validation/.codex-validation/qwen14511-http-effb4761/prepare-probe.py
+      - name: Execute actual HTTP and local journal controls
+        working-directory: source/packages/cli
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          npx --no-install vitest run "$QWEN_PROBE_SCRATCH/command-operations.probe.test.ts" --config "$QWEN_PROBE_SCRATCH/probe.config.ts" 2>&1 | tee "$QWEN_PROBE_SCRATCH/http-probe.log" || status=$?
+          printf '%s\n' "$status" > "$QWEN_PROBE_SCRATCH/http-probe.exit"
+          exit "$status"
+      - name: Always verify tested source tracked bytes and attribution
+        if: always()
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(git rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          git diff HEAD --exit-code 2>&1 | tee "$QWEN_PROBE_SCRATCH/final-source-diff.log"
+          printf '0\n' > "$QWEN_PROBE_SCRATCH/final-source-diff.exit"
+      - name: Upload bounded test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwen14511-http-effb4761-baseline
+          path: |
+            ${{ runner.temp }}/qwen14511-http-effb4761/*.json
+            ${{ runner.temp }}/qwen14511-http-effb4761/*.log
+            ${{ runner.temp }}/qwen14511-http-effb4761/*.exit
+            ${{ runner.temp }}/qwen14511-http-effb4761/*.xml
+            ${{ runner.temp }}/qwen14511-http-effb4761/*.ts
+          if-no-files-found: warn
+          retention-days: 7

@@ -1,0 +1,19 @@
+{
+  "base_source_repository": "QwenLM/qwen-code",
+  "base_source_commit": "61476010ca7f46140eaa39c77952bd1b9109a587",
+  "base_source_tree": "c231640f1b0dcec6b560fc3124cc493f4f8e2c2e",
+  "fixture_repository": "QwenLM/qwen-code",
+  "fixture_commit": "4438f4b66db86c2e8d0facd00c761f21e2f5c8aa",
+  "fixture_path": "packages/cli/src/serve/hosted-harness-command-operations.test.ts",
+  "fixture_git_blob": "4a1f3ba6a99d740eb25f2f6331d35db9f9ef7100",
+  "fixture_sha256": "3ba21599cb6a3694b846f204b75b2dc9f65d860ee4909a61c790729f06de314d",
+  "scratch_adaptations": [
+    "Only relative imports/mocks map to exact tested source.",
+    "Old LocalJsonlManagedSessionJournalStore.read positional calls adapt to current options object.",
+    "Two current error-class controls use a one-shot settlePendingAppend seam."
+  ],
+  "production_sources_edited": false,
+  "scope": "Real Express HTTP route, actual command operations/parser, local on-disk journal/resources; adapter substitutes local stores for remote HTTP storage; broker/mock fetch reject provider access.",
+  "actor": "/root/test_engineer",
+  "created_at": "2026-11-18T04:36:02.093239+00:00"
+}
