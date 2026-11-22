@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
@@ -107,7 +108,7 @@ public class JdbcPhysicalStorageReleaseTest {
                                                         Instant.now())))
                         .getCode());
         assertEquals(
-                JdbcRuntimeBindingRepository.storageAliasKey(frozen.tenant, "second"),
+                RuntimeAdmissionFences.storageAliasKey(frozen.tenant, "second"),
                 frozen.text(
                         "SELECT storage_alias_key FROM ma_runtime_binding WHERE binding_id=?",
                         frozen.binding.getBindingId().getBytes(StandardCharsets.UTF_8)));
@@ -130,7 +131,7 @@ public class JdbcPhysicalStorageReleaseTest {
         wrongScope.execute(
                 "UPDATE ma_storage SET tenant_id=? WHERE alias_key=?",
                 "other-tenant".getBytes(StandardCharsets.UTF_8),
-                JdbcRuntimeBindingRepository.storageAliasKey(wrongScope.tenant, "second"));
+                RuntimeAdmissionFences.storageAliasKey(wrongScope.tenant, "second"));
         assertThrows(RuntimeBrokerException.class, wrongScope::release);
         assertEquals(wrongScope.physical, wrongScope.member());
         wrongScope.unreleased();
@@ -253,9 +254,8 @@ public class JdbcPhysicalStorageReleaseTest {
             alias(tenant, "second");
             execute(
                     "INSERT INTO"
-                        + " ma_storage_owner(storage_key,physical_key,storage_kind,tenant_id,storage_id,mount_state)"
-                        + " VALUES(?,?,?,?,?,'READY')",
-                    physical,
+                        + " ma_storage_owner(storage_key,storage_kind,tenant_id,storage_id,mount_state)"
+                        + " VALUES(?,?,?,?,'READY')",
                     physical,
                     storageKind,
                     (tenant + "-first").getBytes(StandardCharsets.UTF_8),
@@ -354,11 +354,9 @@ public class JdbcPhysicalStorageReleaseTest {
         private void alias(String aliasTenant, String storage) throws Exception {
             execute(
                     "INSERT INTO"
-                        + " ma_storage(alias_key,tenant_key,storage_key,tenant_id,storage_id,physical_key,registration_state,storage_kind,registration_revision,registration_json)"
-                        + " VALUES(?,?,?,?,?,?,'REGISTERED',?,1,'{}')",
-                    JdbcRuntimeBindingRepository.storageAliasKey(aliasTenant, storage),
-                    JdbcRuntimeBindingRepository.storageFenceKey(aliasTenant),
-                    JdbcRuntimeBindingRepository.storageFenceKey(storage),
+                        + " ma_storage(alias_key,tenant_id,storage_id,physical_key,registration_state,storage_kind,registration_revision,registration_json)"
+                        + " VALUES(?,?,?,?,'REGISTERED',?,1,'{}')",
+                    RuntimeAdmissionFences.storageAliasKey(aliasTenant, storage),
                     aliasTenant.getBytes(StandardCharsets.UTF_8),
                     storage.getBytes(StandardCharsets.UTF_8),
                     physical, storageKind);

@@ -19,7 +19,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence;
-import com.alibaba.qwen.code.runtimebroker.RuntimeRequestKeys;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
@@ -1034,8 +1033,8 @@ class WorkspaceRuntimeTest {
         authority.claim(session.workspace(), fixture.record());
         Map<String, Object> publisher = Map.of("url", "http://127.0.0.1:1234/internal/hosted-shell-publisher/v1",
                 "token", "a".repeat(43));
-        when(fixture.http().installPublisherV3(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(null));
-        fixture.transport().installPublisher(fixture.lease(), runtimeSession, publisher).toCompletableFuture().join();
+        when(fixture.http().installPublisherV3(any(), any(), any(), any())).thenReturn(CompletableFuture.completedFuture(Map.of()));
+        fixture.transport().installPublisher(fixture.lease(), runtimeSession, publisher, null).toCompletableFuture().join();
         Map<String, Object> reference = Map.of("sessionId", runtimeSession.getRuntimeSessionId(), "promptId", "turn",
                 "callId", "worker-call", "argsDigest", "sha256:" + "a".repeat(64), "runtimeProtocol", 3,
                 "inputDigest", "b".repeat(64), "executionCallId", "execution", "toolName", "run_shell_command",
@@ -1058,7 +1057,7 @@ class WorkspaceRuntimeTest {
                 .containsEntry("executionCallId", "execution");
         verify(fixture.http(), never()).execute(any(), any(), any());
         jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ?", session.tenantId());
-        assertUnavailable(() -> fixture.transport().installPublisher(fixture.lease(), runtimeSession, publisher));
+        assertUnavailable(() -> fixture.transport().installPublisher(fixture.lease(), runtimeSession, publisher, null));
         when(fixture.http().statusV3(any(), any(), any(), eq(0L))).thenReturn(CompletableFuture.completedFuture(response));
         when(fixture.http().cancelV3(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(response));
         when(fixture.http().acknowledgeV3(any(), any(), any(), any())).thenReturn(CompletableFuture.completedFuture(response));
@@ -1326,6 +1325,48 @@ class WorkspaceRuntimeTest {
     }
 
     @Test
+    void terminalMaintenanceReachesTheDelegateWhileTheSessionIsClosing() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var runtimeSession = fixture.record().getSession();
+        authority.claim(session.workspace(), fixture.record());
+        Map<String, Object> status = Map.of("kind", "terminal-status",
+                "operationId", "terminal-attach:term-1:process", "targetOperationId", "term-1",
+                "sessionKey", Map.of("tenantId", session.tenantId(),
+                        "workspaceId", session.workspace().getWorkspaceId(), "sessionId", session.sessionId()));
+        Map<String, Object> evidence = new LinkedHashMap<>();
+        evidence.put("exitCode", 143);
+        evidence.put("exitSignal", null);
+        Map<String, Object> answer = Map.of("operationId", "term-1", "state", "exited",
+                "evidence", evidence);
+        when(fixture.http().control(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(answer));
+        assertThat(fixture.transport().control(fixture.lease(), runtimeSession, status).toCompletableFuture().join())
+                .isEqualTo(answer);
+        // The close drain sweeps terminal holds after the Session leaves
+        // ACTIVE; the terminal family must ride the recovery arm like Shell
+        // and Monitor, not the ACTIVE-only generic arm that refuses before
+        // the delegate and wedges the hold.
+        jdbc.update("UPDATE ma_session SET status = 'CLOSING' WHERE tenant_id = ? AND session_id = ?",
+                session.tenantId(), session.sessionId());
+        assertThat(fixture.transport().control(fixture.lease(), runtimeSession, status).toCompletableFuture().join())
+                .isEqualTo(answer);
+        Map<String, Object> terminate = new LinkedHashMap<>(status);
+        terminate.put("kind", "terminal-terminate");
+        assertThat(fixture.transport().control(fixture.lease(), runtimeSession, terminate).toCompletableFuture().join())
+                .isEqualTo(answer);
+        verify(fixture.http(), times(3)).control(eq(fixture.lease()), eq(runtimeSession), any());
+        // The terminal branch still validates Session ownership before forwarding.
+        Map<String, Object> foreign = new LinkedHashMap<>(status);
+        foreign.put("sessionKey", Map.of("tenantId", session.tenantId(),
+                "workspaceId", session.workspace().getWorkspaceId(), "sessionId", "another-session"));
+        assertThatThrownBy(() -> fixture.transport().control(fixture.lease(), runtimeSession, foreign))
+                .isInstanceOf(RuntimeBrokerException.class)
+                .extracting(error -> ((RuntimeBrokerException) error).getCode())
+                .isEqualTo("runtime_control_operation_invalid");
+        verify(fixture.http(), times(3)).control(any(), any(), any());
+    }
+
+    @Test
     void closingReleasePreservesTheNewSharedHolderWithoutCurrentAuthorization() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var fixture = transport(session);
@@ -1398,7 +1439,10 @@ class WorkspaceRuntimeTest {
         authority.releaseMaintenance(session.workspace(), maintenance, generation, maintenanceStep);
 
         authority.claim(session.workspace(), turn);
+        var refusedStorage = new java.util.ArrayList<String>();
+        authority.onMaintenanceBusy(refusedStorage::add);
         assertBusy(() -> authority.holdForMaintenance(session.workspace(), maintenance, generation));
+        assertThat(refusedStorage).hasSize(1);
         authority.release(session.workspace(), turn);
         maintenanceStep = authority.holdForMaintenance(session.workspace(), maintenance, generation);
         assertThat(jdbc.queryForList("SELECT maintenance_id FROM ma_storage_owner"
@@ -1450,8 +1494,8 @@ class WorkspaceRuntimeTest {
         try (var connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
             try (var lock = connection.prepareStatement("SELECT tenant_id FROM ma_tenant_guard"
-                    + " WHERE tenant_key = ? AND guard_domain = 'runtime_placement' FOR UPDATE")) {
-                lock.setString(1, RuntimeRequestKeys.valueKey(session.tenantId()));
+                    + " WHERE tenant_id = ? AND guard_domain = 'runtime_placement' FOR UPDATE")) {
+                lock.setString(1, session.tenantId());
                 try (var rows = lock.executeQuery()) {
                     assertThat(rows.next()).isTrue();
                 }

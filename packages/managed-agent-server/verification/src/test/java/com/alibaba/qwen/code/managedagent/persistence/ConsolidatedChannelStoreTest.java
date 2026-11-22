@@ -96,12 +96,12 @@ class ConsolidatedChannelStoreTest {
     private void resource(String session, String body) {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         String scope = ManagedSessionStore.sessionScopeKey("tenant", session);
-        jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,session_id,resource_id,kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create) VALUES (?,?,'tenant',?,'resource','domain',1,?,?, 'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ")",
-                ManagedSchemaKeys.key(scope, "resource"), scope, session, bytes.length,
+        jdbc.update("INSERT INTO ma_resource (resource_key,tenant_id,session_id,resource_id,kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create) VALUES (?,'tenant',?,'resource','domain',1,?,?, 'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ")",
+                ManagedSchemaKeys.key(scope, "resource"), session, bytes.length,
                 ChannelStoreSupport.sha256(body), bytes);
     }
 
     private static ChannelDelivery planned(String channel) {
-        return new ChannelDelivery("tenant", channel, "delivery", "segment", 0, "planned", null, 0, 0);
+        return new ChannelDelivery("tenant", channel, "delivery", "segment", 0, "planned", null, 0, 0, 1);
     }
 }

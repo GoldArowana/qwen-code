@@ -10,7 +10,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeStorage;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -147,22 +147,21 @@ public class JdbcSshWorkspaceStore
             LocalStorageOwners.requireNonOverlapping(jdbc, physicalIdentity(identity));
             String physical = physicalKey(identity);
             String root = SshWorkspaceStore.string(identity, "root");
-            jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, tenant_id, storage_id,"
+            jdbc.update("INSERT INTO ma_storage_owner (storage_key, storage_kind, tenant_id, storage_id,"
                             + " mount_root, mount_host_id, mount_device, mount_inode, mount_birth_time, mount_registration_id)"
-                            + " VALUES (?, ?, 'SSH_LOCAL', ?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE storage_key = storage_key",
-                    physical, physical, intent.tenantId(), intent.storageId(), root, SshWorkspaceStore.string(identity, "hostId"),
+                            + " VALUES (?, 'SSH_LOCAL', ?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE storage_key = storage_key",
+                    physical, intent.tenantId(), intent.storageId(), root, SshWorkspaceStore.string(identity, "hostId"),
                     SshWorkspaceStore.string(identity, "device"), SshWorkspaceStore.string(identity, "inode"), SshWorkspaceStore.string(identity, "birthTime"), intent.registrationId());
             var rows = jdbc.queryForList("SELECT storage_kind, mount_registration_id FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE", physical);
             if (rows.size() != 1 || !KIND.equals(rows.getFirst().get("storage_kind"))
                     || !intent.registrationId().equals(rows.getFirst().get("mount_registration_id"))) {
                 throw new ManagedAgentException(409, "storage_already_registered", "Physical directory already has an owner.");
             }
-            String alias = JdbcRuntimeBindingRepository.storageAliasKey(intent.tenantId(), intent.storageId());
-            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
+            String alias = RuntimeAdmissionFences.storageAliasKey(intent.tenantId(), intent.storageId());
+            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, physical_key,"
                             + " storage_kind, registration_state, registration_revision, registration_json)"
-                            + " VALUES (?, ?, ?, ?, ?, ?, 'SSH_LOCAL', 'FENCE_ONLY', 1, ?)"
+                            + " VALUES (?, ?, ?, ?, 'SSH_LOCAL', 'FENCE_ONLY', 1, ?)"
                             + " ON DUPLICATE KEY UPDATE alias_key = alias_key", alias,
-                    JdbcRuntimeBindingRepository.storageFenceKey(intent.tenantId()), JdbcRuntimeBindingRepository.storageFenceKey(intent.storageId()),
                     bytes(intent.tenantId()), bytes(intent.storageId()), physical, encode(registration));
             jdbc.update("UPDATE ma_operation SET result_json = ? WHERE operation_key = ?", encode(registration),
                     operationKey(intent.tenantId(), intent.operationId()));
@@ -181,7 +180,7 @@ public class JdbcSshWorkspaceStore
 
     /** Turns the reserved storage into the registered Workspace. */
     private void publish(Intent intent) {
-        String alias = JdbcRuntimeBindingRepository.storageAliasKey(intent.tenantId(), intent.storageId());
+        String alias = RuntimeAdmissionFences.storageAliasKey(intent.tenantId(), intent.storageId());
         var rows = jdbc.queryForList("SELECT physical_key FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL' FOR UPDATE", alias);
         if (rows.size() != 1) {
             throw WorkspaceExecutionStore.unavailable();
@@ -274,7 +273,7 @@ public class JdbcSshWorkspaceStore
             if (parked.reserved()) {
                 jdbc.update("DELETE FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL'"
                                 + " AND registration_state = 'FENCE_ONLY'",
-                        JdbcRuntimeBindingRepository.storageAliasKey(tenant, intent.storageId()));
+                        RuntimeAdmissionFences.storageAliasKey(tenant, intent.storageId()));
                 jdbc.update("DELETE FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'SSH_LOCAL'"
                                 + " AND mount_registration_id = ? AND mount_state = 'UNVERIFIED'",
                         physicalKey(SshWorkspaceStore.object(intent.registration(), "identity")), intent.registrationId());
@@ -324,7 +323,7 @@ public class JdbcSshWorkspaceStore
 
     public SshRuntimeStorage runtimeStorage(String tenant, String storage) {
         var rows = jdbc.queryForList("SELECT storage_kind, registration_state, registration_json FROM ma_storage WHERE alias_key = ?",
-                JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage));
+                RuntimeAdmissionFences.storageAliasKey(tenant, storage));
         if (rows.isEmpty() || !KIND.equals(rows.getFirst().get("storage_kind"))) {
             return null;
         }
@@ -342,7 +341,7 @@ public class JdbcSshWorkspaceStore
             return false;
         }
         if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND fence_operation_id IS NULL",
-                Long.class, JdbcRuntimeBindingRepository.storageAliasKey(binding.getTenantId(), binding.getStorageId())) != 1) {
+                Long.class, RuntimeAdmissionFences.storageAliasKey(binding.getTenantId(), binding.getStorageId())) != 1) {
             throw WorkspaceExecutionStore.unavailable();
         }
         Map<String, Object> identity = SshWorkspaceStore.object(storage.registration(), "identity");
@@ -398,7 +397,7 @@ public class JdbcSshWorkspaceStore
         String lock = org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive() ? " FOR UPDATE" : "";
         var rows = jdbc.queryForList("SELECT tenant_id, storage_id, storage_kind, registration_state, physical_key, fence_operation_id"
                 + " FROM ma_storage WHERE alias_key = ?" + lock,
-                JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage));
+                RuntimeAdmissionFences.storageAliasKey(tenant, storage));
         if (rows.isEmpty() || !KIND.equals(rows.getFirst().get("storage_kind"))) {
             return null;
         }

@@ -31,9 +31,9 @@ final class SideQueryConversation {
 
     static ObjectNode state(JdbcTemplate jdbc, String tenant, String session) {
         String scope = scope(tenant, session);
-        var rows = jdbc.query("SELECT options_json FROM ma_session_record WHERE session_scope_key=?"
+        var rows = jdbc.query("SELECT options_json FROM ma_session_record WHERE tenant_id=? AND session_id=?"
                         + " AND record_key=? AND record_kind='CONVERSATION' FOR UPDATE",
-                (row, index) -> row.getString(1), scope, ManagedSchemaKeys.key(scope, DOMAIN));
+                (row, index) -> row.getString(1), tenant, session, ManagedSchemaKeys.key(scope, DOMAIN));
         if (rows.isEmpty()) {
             return JSON.createObjectNode();
         }
@@ -45,7 +45,7 @@ final class SideQueryConversation {
     }
 
     static Prefix capture(JdbcTemplate jdbc, String tenant, String session,
-            long revision, long sequence, String digest) {
+            long revision, long sequence, String digest, JdbcJournalPacks packs) {
         ObjectNode state = state(jdbc, tenant, session);
         if (!state.has("mainInputBoundary")) {
             state.put("mainInputBoundary", admittedInputs(jdbc, tenant, session));
@@ -80,14 +80,24 @@ final class SideQueryConversation {
             long scannedBytes = 0;
             for (long after = projected; after < revision;) {
                 var rows = jdbc.query("SELECT journal_revision,record_bytes,record_digest,previous_commit_digest,"
-                                + "commit_digest FROM ma_session_journal_tx WHERE tenant_id=? AND session_id=?"
+                                + "commit_digest,byte_length FROM ma_session_journal_tx WHERE tenant_id=? AND session_id=?"
                                 + " AND journal_revision>? AND journal_revision<=? ORDER BY journal_revision LIMIT 32",
-                        (row, index) -> new Transaction(row.getLong(1), row.getBytes(2), row.getString(3),
-                                row.getString(4), row.getString(5)), tenant, session, after, revision);
+                        (row, index) -> {
+                            byte[] bytes = row.getBytes(2);
+                            if (bytes == null && packs != null) {
+                                bytes = packs.resolveBytes(tenant, session, row.getLong(1),
+                                        row.getString(3), row.getLong(6));
+                            }
+                            return new Transaction(row.getLong(1), bytes, row.getString(3),
+                                    row.getString(4), row.getString(5));
+                        }, tenant, session, after, revision);
                 if (rows.isEmpty()) {
                     throw corrupt();
                 }
                 for (var row : rows) {
+                    if (row.bytes() == null) {
+                        throw corrupt();
+                    }
                     scannedBytes += row.bytes().length;
                     if (scannedBytes > com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.MAX_MODEL_REQUEST_BYTES) {
                         throw corrupt();
@@ -154,14 +164,14 @@ final class SideQueryConversation {
         String scope = scope(tenant, session);
         String key = ManagedSchemaKeys.key(scope, DOMAIN);
         int updated = jdbc.update("UPDATE ma_session_record SET options_json=?, revision=revision+1"
-                + " WHERE session_scope_key=? AND record_key=? AND record_kind='CONVERSATION'",
-                state.toString(), scope, key);
+                + " WHERE tenant_id=? AND session_id=? AND record_key=? AND record_kind='CONVERSATION'",
+                state.toString(), tenant, session, key);
         if (updated == 0) {
             String workspace = jdbc.queryForObject("SELECT workspace_id FROM ma_session WHERE tenant_id=? AND session_id=?",
                     String.class, tenant, session);
-            jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,workspace_id,domain,"
-                            + "record_id,revision,record_kind,options_json,gmt_create) VALUES (?,?,?,?,?,?,?,1,'CONVERSATION',?,?)",
-                    scope, key, tenant, session, workspace, DOMAIN, DOMAIN, state.toString(), ToolPublicationRetentionStore.now(jdbc));
+            jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,workspace_id,domain,"
+                            + "record_id,revision,record_kind,options_json,gmt_create) VALUES (?,?,?,?,?,?,1,'CONVERSATION',?,?)",
+                    key, tenant, session, workspace, DOMAIN, DOMAIN, state.toString(), ToolPublicationRetentionStore.now(jdbc));
         }
     }
 
