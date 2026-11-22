@@ -1,0 +1,90 @@
+name: Validate Qwen13449 main sync eeafeec5
+on:
+  push:
+    branches:
+      - codex-ci/qwen13449-sync-eeafeec5
+permissions:
+  contents: read
+jobs:
+  check:
+    name: Exact source validation
+    if: github.repository == 'GoldArowana/qwen-code'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 145
+    strategy:
+      fail-fast: false
+      matrix:
+        scope: [targeted, canonical]
+    env:
+      CI: 'true'
+      NODE_OPTIONS: --max-old-space-size=6144
+      SOURCE_COMMIT: '483df7b89ea250abf9ecc977d2d72dce25daacb0'
+      SOURCE_TREE: '4998ea211ff6fd7ad1ee206dab3ae67340d6a681'
+      SOURCE_PARENTS: 'cf5a83fdeb56306455b1cac55d595600da2386a4 b6ad80d8b2fb03b0e1bce699424473d2145c1b00'
+      WORKFLOW_SIZE_BASE_SHA: 'b6ad80d8b2fb03b0e1bce699424473d2145c1b00'
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '22.23.4'
+          package-manager-cache: false
+      - name: Record standard runtime and validation event
+        run: |
+          test "$(node --version)" = v22.23.4
+          npm --version
+          corepack enable
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          printf 'CI_EVENT repo=%s ref=%s commit=%s\n' "$GITHUB_REPOSITORY" "$GITHUB_REF" "$GITHUB_SHA"
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: GoldArowana/qwen-code
+          ref: '483df7b89ea250abf9ecc977d2d72dce25daacb0'
+          path: source
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Assert source commit, tree and merge parents
+        working-directory: source
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$SOURCE_TREE"
+          parents=$(git cat-file -p HEAD | sed -n '/^$/q; s/^parent //p' | paste -sd ' ' -)
+          test "$parents" = "$SOURCE_PARENTS"
+          test "$(git remote get-url origin)" = 'https://github.com/GoldArowana/qwen-code'
+          git cat-file -e "$WORKFLOW_SIZE_BASE_SHA^{commit}"
+          git diff HEAD --exit-code
+          git show -s --format='SOURCE_BINDING commit=%H tree=%T'
+          printf 'SOURCE_PARENTS %s\n' "$parents"
+      - name: Install exact frozen dependencies
+        working-directory: source
+        run: |
+          test "$(corepack pnpm --version)" = 11.24.0
+          corepack pnpm install --frozen-lockfile --reporter=append-only
+          git diff HEAD --exit-code
+      - name: Run affected Shell and background fixtures
+        if: matrix.scope == 'targeted'
+        env:
+          NODE_OPTIONS: --max-old-space-size=3072
+        working-directory: source/packages/cli
+        timeout-minutes: 15
+        run: |
+          corepack pnpm exec vitest run \
+            src/ui/hooks/shellCommandProcessor.test.ts \
+            src/ui/hooks/use-llm-stream.test.tsx \
+            src/ui/components/background-view/BackgroundTasksDialog.test.tsx
+          git diff HEAD --exit-code
+          echo QWEN13449_EXACT_TARGETED_PASSED
+      - name: Run unchanged upstream preflight
+        if: matrix.scope == 'canonical'
+        working-directory: source
+        timeout-minutes: 125
+        run: |
+          npm run preflight
+          echo QWEN13449_EXACT_PREFLIGHT_PASSED
+      - name: Always assert exact source and tracked worktree cleanliness
+        if: always()
+        run: |
+          test -d source/.git
+          cd source
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$SOURCE_TREE"
+          git diff HEAD --exit-code
+          echo QWEN13449_EXACT_TRACKED_SOURCE_UNCHANGED
