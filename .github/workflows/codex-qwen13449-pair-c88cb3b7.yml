@@ -1,4 +1,4 @@
-name: Qwen 13449 current-merge source validation c88cb3b7
+name: Qwen 13449 balanced failure capture c88cb3b7
 on:
   push:
     branches:
@@ -9,7 +9,7 @@ jobs:
   pair:
     if: github.repository == 'GoldArowana/qwen-code'
     runs-on: ubuntu-26.04
-    timeout-minutes: 35
+    timeout-minutes: 20
     env:
       CI: 'true'
       NODE_OPTIONS: --max-old-space-size=6144
@@ -72,187 +72,108 @@ jobs:
           (cd packages/core && node --input-type=module -e 'import {checkAndReport} from "../../scripts/vitest-global-setup.js"; process.exitCode = checkAndReport()')
           git diff --exit-code
           git diff --cached --exit-code
-      - name: Execute the exact worktree fixture on both trees
-        id: focused
+      - name: Run the balanced Core fixture and capture first errors
+        timeout-minutes: 8
         working-directory: paired-source
         run: |
-          result=0
-          for revision in "$BASE_SHA" "$CANDIDATE_SHA"; do
-            if [ "$revision" = "$BASE_SHA" ]; then
-              tree="$BASE_TREE"
-            else
-              tree="$CANDIDATE_TREE"
-            fi
-            git switch --detach "$revision"
-            test "$(git rev-parse HEAD)" = "$revision"
-            test "$(git rev-parse 'HEAD^{tree}')" = "$tree"
-            git diff --exit-code
-            git diff --cached --exit-code
-            git show -s --format='PAIR_SOURCE commit=%H tree=%T'
-            report="$RUNNER_TEMP/qwen-worktree-$revision.json"
-            status=0
-            (
-              cd packages/core
-              corepack pnpm exec vitest run src/services/gitWorktreeService.dirty-carry.integ.test.ts \
-                --testNamePattern "$TEST_PATTERN" --reporter=verbose --reporter=json --outputFile="$report"
-            ) || status=$?
-            printf 'PAIR_RESULT commit=%s exit_code=%s\n' "$revision" "$status"
-            test "$(git rev-parse HEAD)" = "$revision"
-            test "$(git rev-parse 'HEAD^{tree}')" = "$tree"
-            git diff --exit-code
-            git diff --cached --exit-code
-            if ! node --input-type=module - "$report" "$status" <<'JS'
-          import { readFileSync } from 'node:fs';
-          const [report, status] = process.argv.slice(2);
-          const data = JSON.parse(readFileSync(report, 'utf8'));
-          const files = data.testResults;
-          if (files.length !== 1 || !files[0].name.endsWith('/' + process.env.FIXTURE_PATH)) {
-            throw new Error('Expected the named worktree fixture file');
-          }
-          const executed = files[0].assertionResults
-            .filter((test) => test.status === 'passed' || test.status === 'failed');
-          if (executed.length !== 1 || executed[0].title !== process.env.TEST_NAME ||
-              (executed[0].status === 'passed') !== (status === '0')) {
-            throw new Error('Expected exactly the named fixture and matching exit status');
-          }
-          console.log('PAIR_TEST', executed[0].title, executed[0].status);
-          JS
-            then
-              result=1
-              continue
-            fi
-            if [ "$status" -ne 0 ]; then
-              result=1
-              (
-                cd packages/core || exit 1
-                fixture=src/services/gitWorktreeService.dirty-carry.integ.test.ts
-                diagnostic=src/services/gitWorktreeService.dirty-carry.diagnostic.integ.test.ts
-                test ! -e "$diagnostic" || exit 1
-                python3 - "$fixture" "$diagnostic" <<'PY' || exit 1
-          import sys
-          from pathlib import Path
-
-          source, target = map(Path, sys.argv[1:])
-          before = b"    expect(result.success).toBe(true);\n    return result.worktree!;"
-          after = b"    expect(result.success, result.error ?? 'createUserWorktree returned no error').toBe(true);\n    return result.worktree!;"
-          data = source.read_bytes()
-          if data.count(before) != 1:
-              raise SystemExit("Missing unique create helper assertion")
-          with target.open("xb") as stream:
-              stream.write(data.replace(before, after))
-          PY
-                trap 'rm -- "$diagnostic"' EXIT
-                diagnostic_status=0
-                corepack pnpm exec vitest run "$diagnostic" \
-                  --testNamePattern "$TEST_PATTERN" --reporter=verbose || diagnostic_status=$?
-                printf 'PAIR_DIAGNOSTIC commit=%s exit_code=%s\n' "$revision" "$diagnostic_status"
-              ) || printf 'PAIR_DIAGNOSTIC_SETUP_FAILED commit=%s\n' "$revision"
-              test ! -e packages/core/src/services/gitWorktreeService.dirty-carry.diagnostic.integ.test.ts
-              git diff --exit-code
-              git diff --cached --exit-code
-            fi
-          done
-          exit "$result"
-      - name: Compare the complete worktree fixture file on both source trees
-        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
-        working-directory: paired-source
-        run: |
-          rc=0
-          target=src/services/gitWorktreeService.dirty-carry.integ.test.ts
-          diagnostic=src/services/gitWorktreeService.dirty-carry.diagnostic.integ.test.ts
-          for revision in "$BASE_SHA" "$CANDIDATE_SHA"; do
-            tree="$CANDIDATE_TREE"
-            if [ "$revision" = "$BASE_SHA" ]; then tree="$BASE_TREE"; fi
-            git switch --detach "$revision"
-            test "$(git rev-parse HEAD)" = "$revision"
-            test "$(git rev-parse 'HEAD^{tree}')" = "$tree"
-            git diff HEAD --exit-code
-            test ! -e "packages/core/$diagnostic"
-            report="$RUNNER_TEMP/qwen-worktree-whole-$revision.json"
-            status=0
-            (
-              cd packages/core
-              corepack pnpm exec vitest run "$target" \
-                --reporter=verbose --reporter=json --outputFile="$report"
-            ) || status=$?
-            printf 'PAIR_WHOLE_FILE commit=%s tree=%s exit=%s\n' "$revision" "$tree" "$status"
-            if python3 - "$report" "$target" "$status" <<'PY'
-          import collections
+          python3 - <<'PYTHON'
           import json
           import os
-          import sys
+          import subprocess
+          import time
           from pathlib import Path
 
-          report, target, status = sys.argv[1:]
-          files = json.loads(Path(report).read_text())["testResults"]
-          assert len(files) == 1 and files[0]["name"].endswith("/" + target), files
-          counts = collections.Counter(case["status"] for case in files[0]["assertionResults"])
-          assert counts["passed"] + counts["failed"] > 1, counts
-          assert status != "0" or counts["failed"] == 0, (status, counts)
-          matches = [
-              case for case in files[0]["assertionResults"]
-              if case["title"] == os.environ["TEST_NAME"]
+          base = os.environ["BASE_SHA"]
+          candidate = os.environ["CANDIDATE_SHA"]
+          trees = {base: os.environ["BASE_TREE"], candidate: os.environ["CANDIDATE_TREE"]}
+          test_name = os.environ["TEST_NAME"]
+          test_pattern = os.environ["TEST_PATTERN"]
+          core = Path("packages/core").resolve()
+          fixture = core / os.environ["FIXTURE_PATH"]
+          diagnostic = fixture.with_name("gitWorktreeService.dirty-carry.first-failure.integ.test.ts")
+          assertion = b"    expect(result.success).toBe(true);\n    return result.worktree!;"
+          capture = (
+              b"    if (!result.success) {\n"
+              b"      console.error('QWEN_RESULT_ERROR', JSON.stringify(result.error ?? null));\n"
+              b"    }\n"
+          )
+          initial_fixture = fixture.read_bytes()
+          assert initial_fixture.count(assertion) == 1
+
+
+          def git(*args):
+              return subprocess.check_output(["git", *args], text=True).strip()
+
+
+          def assert_source(revision):
+              assert git("rev-parse", "HEAD") == revision
+              assert git("rev-parse", "HEAD^{tree}") == trees[revision]
+              assert not git("diff", "HEAD", "--exit-code")
+              assert not diagnostic.exists()
+              assert fixture.read_bytes() == initial_fixture
+
+
+          def run_one(revision, mode, index):
+              git("switch", "--detach", revision)
+              assert_source(revision)
+              selected = fixture
+              if mode == "instrumented":
+                  with diagnostic.open("xb") as handle:
+                      handle.write(initial_fixture.replace(assertion, capture + assertion))
+                  selected = diagnostic
+
+              report = Path(os.environ["RUNNER_TEMP"]) / f"qwen-balanced-{index}.json"
+              print("QWEN_BALANCED_START", json.dumps({
+                  "index": index, "mode": mode, "source": revision,
+                  "tree": trees[revision], "path": selected.name,
+              }), flush=True)
+              started = time.monotonic()
+              try:
+                  process = subprocess.run([
+                      "corepack", "pnpm", "exec", "vitest", "run",
+                      str(selected.relative_to(core)), "--testNamePattern", test_pattern,
+                      "--reporter=verbose", "--reporter=json", f"--outputFile={report}",
+                  ], cwd=core, timeout=120, check=False)
+                  files = json.loads(report.read_text())["testResults"]
+                  assert len(files) == 1 and files[0]["name"].endswith("/" + selected.name), files
+                  executed = [test for test in files[0]["assertionResults"] if test["status"] in ("passed", "failed")]
+                  assert len(executed) == 1 and executed[0]["title"] == test_name, executed
+                  result = executed[0]["status"]
+                  assert (result == "passed") == (process.returncode == 0), (result, process.returncode)
+                  print("QWEN_BALANCED_RESULT", json.dumps({
+                      "index": index, "mode": mode, "source": revision, "tests_run": 1,
+                      "status": result, "exit": process.returncode,
+                      "elapsed_seconds": round(time.monotonic() - started, 3),
+                  }), flush=True)
+                  return result
+              finally:
+                  if mode == "instrumented":
+                      diagnostic.unlink()
+                  assert_source(revision)
+
+
+          # Four counterbalanced pairs preserve a failure from the first invocation.
+          # Two original-file controls keep the changed fixture path visible.
+          sequence = [
+              ("instrumented", base), ("instrumented", candidate),
+              ("instrumented", candidate), ("instrumented", base),
+              ("instrumented", candidate), ("instrumented", base),
+              ("instrumented", base), ("instrumented", candidate),
+              ("original", candidate), ("original", base),
           ]
-          assert len(matches) == 1 and matches[0]["status"] in {"passed", "failed"}, matches
-          print(json.dumps({"counts": counts, "named_fixture_status": matches[0]["status"]}))
-          if matches[0]["status"] == "failed":
-              assert status != "0"
-              sys.exit(2)
-          if status != "0":
-              sys.exit(3)
-          PY
-            then
-              observation=0
-            else
-              observation=$?
-            fi
-            case "$observation" in
-              0) ;;
-              2)
-                rc=1
-                (
-                  cd packages/core
-                  python3 - "$target" "$diagnostic" <<'PY' || exit 1
-          import sys
-          from pathlib import Path
-
-          source, target = map(Path, sys.argv[1:])
-          before = b"    expect(result.success).toBe(true);\n    return result.worktree!;"
-          after = b"    expect(result.success, result.error ?? 'createUserWorktree returned no error').toBe(true);\n    return result.worktree!;"
-          original = source.read_bytes()
-          if original.count(before) != 1:
-              raise SystemExit("Create helper assertion changed")
-          with target.open("xb") as stream:
-              stream.write(original.replace(before, after))
-          PY
-                  trap 'rm -- "$diagnostic"' EXIT
-                  diagnostic_status=0
-                  corepack pnpm exec vitest run "$diagnostic" \
-                    --reporter=verbose || diagnostic_status=$?
-                  printf 'PAIR_WHOLE_DIAGNOSTIC commit=%s exit=%s\n' "$revision" "$diagnostic_status"
-                ) || printf 'PAIR_DIAGNOSTIC_SETUP_FAILED commit=%s\n' "$revision"
-                ;;
-              *) rc=1 ;;
-            esac
-            test ! -e "packages/core/$diagnostic"
-            test "$(git rev-parse HEAD)" = "$revision"
-            test "$(git rev-parse 'HEAD^{tree}')" = "$tree"
-            git diff HEAD --exit-code
-          done
-          exit "$rc"
-      - name: Run affected CLI fixtures on the candidate merge tree
-        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
-        timeout-minutes: 15
-        working-directory: paired-source/packages/cli
-        run: |
-          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
-          test "$(git rev-parse 'HEAD^{tree}')" = "$CANDIDATE_TREE"
-          git diff HEAD --exit-code
-          corepack pnpm exec vitest run \
-            src/ui/hooks/shellCommandProcessor.test.ts \
-            src/ui/hooks/use-llm-stream.test.tsx \
-            src/ui/components/background-view/BackgroundTasksDialog.test.tsx
-          git diff HEAD --exit-code
+          failures = []
+          try:
+              for index, (mode, revision) in enumerate(sequence, 1):
+                  if run_one(revision, mode, index) == "failed":
+                      failures.append({"index": index, "mode": mode, "source": revision})
+          finally:
+              git("switch", "--detach", candidate)
+              assert_source(candidate)
+          print("QWEN_BALANCED_COMPLETE", json.dumps({
+              "runs": len(sequence), "failures": failures, "candidate_clean": True,
+          }), flush=True)
+          raise SystemExit(1 if failures else 0)
+          PYTHON
       - name: Verify exact and clean sources after execution
         if: ${{ always() && steps.bootstrap.outcome == 'success' }}
         working-directory: paired-source
