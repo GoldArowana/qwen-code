@@ -1,0 +1,263 @@
+name: Qwen 13449 current-merge source validation c88cb3b7
+on:
+  push:
+    branches:
+      - codex-ci/qwen13449-pair-c88cb3b7
+permissions:
+  contents: read
+jobs:
+  pair:
+    if: github.repository == 'GoldArowana/qwen-code'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    env:
+      CI: 'true'
+      NODE_OPTIONS: --max-old-space-size=6144
+      BASE_SHA: 55ee16ec23727a20767e2f4a768bf4ff278793a3
+      BASE_TREE: bd24bf19e42136a41e70c02148e689ab66bd608d
+      CANDIDATE_SHA: 04453f2fcb05f2b05492d2d2f9fe08901991d7b6
+      AUTHOR_SHA: cf5a83fdeb56306455b1cac55d595600da2386a4
+      CANDIDATE_TREE: 1b58d30b4d76ae63dd1c6f23aa4e17b61e752c6b
+      TEST_NAME: 'keeps a tracked legacy .qwen/.gitignore instead of migrating it'
+      FIXTURE_PATH: src/services/gitWorktreeService.dirty-carry.integ.test.ts
+      TEST_PATTERN: 'keeps a tracked legacy \.qwen/\.gitignore instead of migrating it$'
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '22.23.4'
+          package-manager-cache: false
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: QwenLM/qwen-code
+          ref: 04453f2fcb05f2b05492d2d2f9fe08901991d7b6
+          path: paired-source
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify source pair and install frozen dependencies
+        id: bootstrap
+        working-directory: paired-source
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(node --version)" = v22.23.4
+          git --version
+          printf 'RUNNER image_os=%s image_version=%s runner_os=%s runner_arch=%s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}" "$RUNNER_OS" "$RUNNER_ARCH"
+          printf 'OUTPUT_SCOPE main_parent=%s merge_candidate=%s\n' "$BASE_SHA" "$CANDIDATE_SHA"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$CANDIDATE_TREE"
+          test "$(git rev-parse 'HEAD^1')" = "$BASE_SHA"
+          test "$(git rev-parse 'HEAD^2')" = "$AUTHOR_SHA"
+          test "$(git rev-parse "${BASE_SHA}^{tree}")" = "$BASE_TREE"
+          test "$(git remote get-url origin)" = 'https://github.com/QwenLM/qwen-code'
+          python3 - "$BASE_SHA" "$CANDIDATE_SHA" <<'PYTHON'
+          import subprocess
+          import sys
+
+          actual = subprocess.check_output(
+              ["git", "diff", "--name-only", "-z", *sys.argv[1:]]
+          ).decode().split("\0")
+          expected = [
+              "",
+              "docs/users/features/commands.md",
+              "packages/cli/src/ui/hooks/shellCommandProcessor.test.ts",
+              "packages/cli/src/ui/hooks/shellCommandProcessor.ts",
+              "packages/cli/src/ui/hooks/use-llm-stream.test.tsx",
+              "packages/cli/src/ui/hooks/use-llm-stream.ts",
+          ]
+          assert sorted(actual) == expected, actual
+          PYTHON
+          corepack enable
+          test "$(corepack pnpm --version)" = 11.24.0
+          corepack pnpm install --frozen-lockfile --reporter=append-only
+          # Root prepare runs the standard build during frozen installation.
+          (cd packages/core && node --input-type=module -e 'import {checkAndReport} from "../../scripts/vitest-global-setup.js"; process.exitCode = checkAndReport()')
+          git diff --exit-code
+          git diff --cached --exit-code
+      - name: Execute the exact worktree fixture on both trees
+        id: focused
+        working-directory: paired-source
+        run: |
+          result=0
+          for revision in "$BASE_SHA" "$CANDIDATE_SHA"; do
+            if [ "$revision" = "$BASE_SHA" ]; then
+              tree="$BASE_TREE"
+            else
+              tree="$CANDIDATE_TREE"
+            fi
+            git switch --detach "$revision"
+            test "$(git rev-parse HEAD)" = "$revision"
+            test "$(git rev-parse 'HEAD^{tree}')" = "$tree"
+            git diff --exit-code
+            git diff --cached --exit-code
+            git show -s --format='PAIR_SOURCE commit=%H tree=%T'
+            report="$RUNNER_TEMP/qwen-worktree-$revision.json"
+            status=0
+            (
+              cd packages/core
+              corepack pnpm exec vitest run src/services/gitWorktreeService.dirty-carry.integ.test.ts \
+                --testNamePattern "$TEST_PATTERN" --reporter=verbose --reporter=json --outputFile="$report"
+            ) || status=$?
+            printf 'PAIR_RESULT commit=%s exit_code=%s\n' "$revision" "$status"
+            test "$(git rev-parse HEAD)" = "$revision"
+            test "$(git rev-parse 'HEAD^{tree}')" = "$tree"
+            git diff --exit-code
+            git diff --cached --exit-code
+            if ! node --input-type=module - "$report" "$status" <<'JS'
+          import { readFileSync } from 'node:fs';
+          const [report, status] = process.argv.slice(2);
+          const data = JSON.parse(readFileSync(report, 'utf8'));
+          const files = data.testResults;
+          if (files.length !== 1 || !files[0].name.endsWith('/' + process.env.FIXTURE_PATH)) {
+            throw new Error('Expected the named worktree fixture file');
+          }
+          const executed = files[0].assertionResults
+            .filter((test) => test.status === 'passed' || test.status === 'failed');
+          if (executed.length !== 1 || executed[0].title !== process.env.TEST_NAME ||
+              (executed[0].status === 'passed') !== (status === '0')) {
+            throw new Error('Expected exactly the named fixture and matching exit status');
+          }
+          console.log('PAIR_TEST', executed[0].title, executed[0].status);
+          JS
+            then
+              result=1
+              continue
+            fi
+            if [ "$status" -ne 0 ]; then
+              result=1
+              (
+                cd packages/core || exit 1
+                fixture=src/services/gitWorktreeService.dirty-carry.integ.test.ts
+                diagnostic=src/services/gitWorktreeService.dirty-carry.diagnostic.integ.test.ts
+                test ! -e "$diagnostic" || exit 1
+                python3 - "$fixture" "$diagnostic" <<'PY' || exit 1
+          import sys
+          from pathlib import Path
+
+          source, target = map(Path, sys.argv[1:])
+          before = b"    expect(result.success).toBe(true);\n    return result.worktree!;"
+          after = b"    expect(result.success, result.error ?? 'createUserWorktree returned no error').toBe(true);\n    return result.worktree!;"
+          data = source.read_bytes()
+          if data.count(before) != 1:
+              raise SystemExit("Missing unique create helper assertion")
+          with target.open("xb") as stream:
+              stream.write(data.replace(before, after))
+          PY
+                trap 'rm -- "$diagnostic"' EXIT
+                diagnostic_status=0
+                corepack pnpm exec vitest run "$diagnostic" \
+                  --testNamePattern "$TEST_PATTERN" --reporter=verbose || diagnostic_status=$?
+                printf 'PAIR_DIAGNOSTIC commit=%s exit_code=%s\n' "$revision" "$diagnostic_status"
+              ) || printf 'PAIR_DIAGNOSTIC_SETUP_FAILED commit=%s\n' "$revision"
+              test ! -e packages/core/src/services/gitWorktreeService.dirty-carry.diagnostic.integ.test.ts
+              git diff --exit-code
+              git diff --cached --exit-code
+            fi
+          done
+          exit "$result"
+      - name: Compare the complete worktree fixture file on both source trees
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        working-directory: paired-source
+        run: |
+          rc=0
+          target=src/services/gitWorktreeService.dirty-carry.integ.test.ts
+          diagnostic=src/services/gitWorktreeService.dirty-carry.diagnostic.integ.test.ts
+          for revision in "$BASE_SHA" "$CANDIDATE_SHA"; do
+            tree="$CANDIDATE_TREE"
+            if [ "$revision" = "$BASE_SHA" ]; then tree="$BASE_TREE"; fi
+            git switch --detach "$revision"
+            test "$(git rev-parse HEAD)" = "$revision"
+            test "$(git rev-parse 'HEAD^{tree}')" = "$tree"
+            git diff HEAD --exit-code
+            test ! -e "packages/core/$diagnostic"
+            report="$RUNNER_TEMP/qwen-worktree-whole-$revision.json"
+            status=0
+            (
+              cd packages/core
+              corepack pnpm exec vitest run "$target" \
+                --reporter=verbose --reporter=json --outputFile="$report"
+            ) || status=$?
+            printf 'PAIR_WHOLE_FILE commit=%s tree=%s exit=%s\n' "$revision" "$tree" "$status"
+            if python3 - "$report" "$target" "$status" <<'PY'
+          import collections
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          report, target, status = sys.argv[1:]
+          files = json.loads(Path(report).read_text())["testResults"]
+          assert len(files) == 1 and files[0]["name"].endswith("/" + target), files
+          counts = collections.Counter(case["status"] for case in files[0]["assertionResults"])
+          assert counts["passed"] + counts["failed"] > 1, counts
+          assert status != "0" or counts["failed"] == 0, (status, counts)
+          matches = [
+              case for case in files[0]["assertionResults"]
+              if case["title"] == os.environ["TEST_NAME"]
+          ]
+          assert len(matches) == 1 and matches[0]["status"] in {"passed", "failed"}, matches
+          print(json.dumps({"counts": counts, "named_fixture_status": matches[0]["status"]}))
+          if matches[0]["status"] == "failed":
+              assert status != "0"
+              sys.exit(2)
+          if status != "0":
+              sys.exit(3)
+          PY
+            then
+              observation=0
+            else
+              observation=$?
+            fi
+            case "$observation" in
+              0) ;;
+              2)
+                rc=1
+                (
+                  cd packages/core
+                  python3 - "$target" "$diagnostic" <<'PY' || exit 1
+          import sys
+          from pathlib import Path
+
+          source, target = map(Path, sys.argv[1:])
+          before = b"    expect(result.success).toBe(true);\n    return result.worktree!;"
+          after = b"    expect(result.success, result.error ?? 'createUserWorktree returned no error').toBe(true);\n    return result.worktree!;"
+          original = source.read_bytes()
+          if original.count(before) != 1:
+              raise SystemExit("Create helper assertion changed")
+          with target.open("xb") as stream:
+              stream.write(original.replace(before, after))
+          PY
+                  trap 'rm -- "$diagnostic"' EXIT
+                  diagnostic_status=0
+                  corepack pnpm exec vitest run "$diagnostic" \
+                    --reporter=verbose || diagnostic_status=$?
+                  printf 'PAIR_WHOLE_DIAGNOSTIC commit=%s exit=%s\n' "$revision" "$diagnostic_status"
+                ) || printf 'PAIR_DIAGNOSTIC_SETUP_FAILED commit=%s\n' "$revision"
+                ;;
+              *) rc=1 ;;
+            esac
+            test ! -e "packages/core/$diagnostic"
+            test "$(git rev-parse HEAD)" = "$revision"
+            test "$(git rev-parse 'HEAD^{tree}')" = "$tree"
+            git diff HEAD --exit-code
+          done
+          exit "$rc"
+      - name: Run affected CLI fixtures on the candidate merge tree
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        timeout-minutes: 15
+        working-directory: paired-source/packages/cli
+        run: |
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$CANDIDATE_TREE"
+          git diff HEAD --exit-code
+          corepack pnpm exec vitest run \
+            src/ui/hooks/shellCommandProcessor.test.ts \
+            src/ui/hooks/use-llm-stream.test.tsx \
+            src/ui/components/background-view/BackgroundTasksDialog.test.tsx
+          git diff HEAD --exit-code
+      - name: Verify exact and clean sources after execution
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        working-directory: paired-source
+        run: |
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$CANDIDATE_TREE"
+          git diff --exit-code
+          git diff --cached --exit-code
