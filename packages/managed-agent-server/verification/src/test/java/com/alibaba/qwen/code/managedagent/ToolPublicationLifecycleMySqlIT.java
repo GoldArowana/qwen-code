@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
@@ -47,6 +48,7 @@ import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMI
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
+import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class ToolPublicationLifecycleMySqlIT {
@@ -74,6 +76,16 @@ class ToolPublicationLifecycleMySqlIT {
             var transaction = new TransactionTemplate(new DataSourceTransactionManager(source));
             ToolPublicationObjectStore objects = new ToolPublicationObjectStore() {
                 @Override
+                public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                    guard.run();
+                    try (InputStream full = open(key)) {
+                        byte[] bytes = full.readAllBytes();
+                        return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                    } catch (java.io.IOException error) {
+                        throw new IllegalStateException(error);
+                    }
+                }
+                @Override
                 public void putIfAbsent(String key, byte[] bytes) {
                     throw new AssertionError("Inline fixture expected");
                 }
@@ -93,7 +105,7 @@ class ToolPublicationLifecycleMySqlIT {
             envelope.set("capture", JSON.createObjectNode().put("captureStatus", "unavailable")
                     .put("captureReason", "storage_failed").put("previewTruncated", false)
                     .put("deliveryStatus", "pending").putNull("manifest"));
-            data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", envelope.toString().getBytes(StandardCharsets.UTF_8));
+            verified(data).finish(key, "pub-1", PUBLICATION_TOKEN, "finish", envelope.toString().getBytes(StandardCharsets.UTF_8));
             var outcome = JSON.createObjectNode().put("schemaVersion", 1).put("decision", "blocked").putNull("manifestRef");
             outcome.set("envelope", envelope);
             var history = JSON.createObjectNode().put("messageId", "11111111-1111-4111-8111-111111111111")
@@ -140,6 +152,11 @@ class ToolPublicationLifecycleMySqlIT {
                     .agentId("qwen-code")
                     .selection(new WorkspaceSelection("neighbor", "."))
                     .build()).sessionId());
+            // Keep the v1 lifecycle witness on external-files: files moved to protocol 2,
+            // which requires a WorkspaceProfileLifecycleVerifier this hand-built store
+            // cannot inject (setProfiles is package-private to the persistence package).
+            jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
+                    WorkspaceToolProfiles.EXTERNAL_FILES, "tenant-1", session);
             String operationId = transaction.execute(ignored -> agents.beginWorkspaceLifecycle("tenant-1", session,
                     OperationKind.CLOSE, "owner", "a".repeat(64), "close", "digest", true, 1).operation().operationId());
             var operation = transaction.execute(ignored -> agents.claimOperation("tenant-1", session, operationId,
@@ -216,7 +233,7 @@ class ToolPublicationLifecycleMySqlIT {
                                         // (#16354), so the receipt parks on the root
                                         // statement its lane actually runs.
                                         if (execute && "receipt".equals(role)
-                                                && sql.startsWith("SELECT tenant_id, session_id, is_csi_guard FROM ma_session")) {
+                                                && sql.startsWith("SELECT tenant_id, session_id FROM ma_session")) {
                                             receiptPlacement.countDown();
                                         }
                                         try {

@@ -30,6 +30,7 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.M
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.RUNTIME_STATUS_STATES;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.conflict;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.immutableMap;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isPublicationV3;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapFailure;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.notFound;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireOpen;
@@ -163,9 +164,9 @@ final class RuntimeExecutionReconciler {
             String harnessSessionId, String runtimeSessionId,
             String executionCallId) {
         requireOpen(closed);
-        String harnessId = BrokerValues.requireId(harnessSessionId,
+        String harnessId = BrokerValues.requireHarnessSessionId(harnessSessionId,
                 "harnessSessionId");
-        String runtimeId = BrokerValues.requireId(runtimeSessionId,
+        String runtimeId = BrokerValues.requireRuntimeSessionId(runtimeSessionId,
                 "runtimeSessionId");
         String executionId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
@@ -186,9 +187,9 @@ final class RuntimeExecutionReconciler {
             String harnessSessionId, String runtimeSessionId,
             String executionCallId) {
         requireOpen(closed);
-        String harnessId = BrokerValues.requireId(harnessSessionId,
+        String harnessId = BrokerValues.requireHarnessSessionId(harnessSessionId,
                 "harnessSessionId");
-        String runtimeId = BrokerValues.requireId(runtimeSessionId,
+        String runtimeId = BrokerValues.requireRuntimeSessionId(runtimeSessionId,
                 "runtimeSessionId");
         String executionId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
@@ -213,7 +214,7 @@ final class RuntimeExecutionReconciler {
             return CompletableFuture.completedFuture(notUnknown(unknown,
                     null));
         }
-        if ("deferred_v3".equals(unknown.getReference().get("dispatchMode"))
+        if (isPublicationV3(unknown.getReference())
                 && publicationVerifier != null) {
             Map<String, Object> durable = publicationVerifier.finished(unknown);
             if (durable != null) {
@@ -320,7 +321,7 @@ final class RuntimeExecutionReconciler {
                             ? transport.statusV4(context.lease(), context.session(),
                                     unknown.getReference(), unknown.getLastSequence())
                                     .thenApply(RuntimeBrokerSupport::projectV3Status)
-                            : "deferred_v3".equals(unknown.getReference().get("dispatchMode"))
+                            : isPublicationV3(unknown.getReference())
                             ? transport.statusV3(context.lease(), context.session(),
                                     unknown.getReference(), unknown.getLastSequence())
                                     .thenApply(RuntimeBrokerSupport::projectV3Status)
