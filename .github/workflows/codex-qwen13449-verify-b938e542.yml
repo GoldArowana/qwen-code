@@ -1,0 +1,101 @@
+name: Validate Qwen13449 integration b938e542
+on:
+  push:
+    branches:
+      - codex-ci/qwen13449-verify-b938e542
+permissions:
+  contents: read
+jobs:
+  exact-source:
+    name: Exact source validation
+    if: github.repository == 'GoldArowana/qwen-code'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 145
+    strategy:
+      fail-fast: false
+      matrix:
+        scope: [integrated, canonical]
+    env:
+      CI: 'true'
+      NODE_OPTIONS: --max-old-space-size=6144
+      SOURCE_COMMIT: 'd86753d3d16ec14e2ba3659c4f4f502ba01f0eb5'
+      SOURCE_TREE: '46f660276ba86efb783390dd175f39cfe5e4e40e'
+      SOURCE_PARENTS: '034dc661705bcebfac8628b3ee9a8ab926640a5f 31e4e272d7b58fc9f4f73779c47756b97e009d07'
+      PUBLIC_PR_HEAD: 'cf5a83fdeb56306455b1cac55d595600da2386a4'
+      WORKFLOW_SIZE_BASE_SHA: '31e4e272d7b58fc9f4f73779c47756b97e009d07'
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '22.23.4'
+          package-manager-cache: false
+      - name: Record standard runtime and validation event
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(node --version)" = v22.23.4
+          npm --version
+          git --version
+          corepack enable
+          printf 'CI_EVENT repo=%s ref=%s sha=%s\n' "$GITHUB_REPOSITORY" "$GITHUB_REF" "$GITHUB_SHA"
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        if: matrix.scope == 'integrated'
+        with:
+          ref: ${{ github.sha }}
+          path: validation
+          persist-credentials: false
+          sparse-checkout: |
+            validation/qwen13449/
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: GoldArowana/qwen-code
+          ref: 'd86753d3d16ec14e2ba3659c4f4f502ba01f0eb5'
+          path: source
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Assert actual source commit, tree and merge parents
+        working-directory: source
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$SOURCE_TREE"
+          parents=$(git cat-file -p HEAD | sed -n '/^$/q; s/^parent //p' | paste -sd ' ' -)
+          test "$parents" = "$SOURCE_PARENTS"
+          first_parent=${SOURCE_PARENTS%% *}
+          public_parent=$(git cat-file -p "$first_parent" | sed -n '/^$/q; s/^parent //p' | sed -n '1p')
+          test "$public_parent" = "$PUBLIC_PR_HEAD"
+          test "$(git remote get-url origin)" = 'https://github.com/GoldArowana/qwen-code'
+          git cat-file -e "$WORKFLOW_SIZE_BASE_SHA^{commit}"
+          git diff HEAD --exit-code
+          git show -s --format='SOURCE_BINDING commit=%H tree=%T'
+      - name: Bootstrap the exact frozen workspace
+        working-directory: source
+        run: |
+          test "$(corepack pnpm --version)" = 11.24.0
+          corepack pnpm install --frozen-lockfile --reporter=append-only
+          git diff HEAD --exit-code
+      - name: Validate direct Ink PTY and ACP transport
+        if: matrix.scope == 'integrated'
+        working-directory: source
+        timeout-minutes: 45
+        run: |
+          npm run build
+          npm run bundle
+          witness_dir="$GITHUB_WORKSPACE/validation/validation/qwen13449"
+          echo "8ab1a4c1fe35f894eb0c35a55e0adb97235cb1cf6fc294ca2a5f48a9dbf0cd32  $witness_dir/run-integrated-controls.sh" | sha256sum --check
+          bash "$witness_dir/run-integrated-controls.sh" "$SOURCE_COMMIT" "$SOURCE_TREE" \
+            cacf3c7c0a4e608b8e285a1b887b7c5f2e8cf705bb719117316a61041a2d78ab "$witness_dir/direct-shell-pty.mts"
+          echo QWEN13449_EXACT_INTEGRATION_PASSED
+      - name: Run unchanged upstream preflight
+        if: matrix.scope == 'canonical'
+        working-directory: source
+        timeout-minutes: 125
+        run: |
+          npm run preflight
+          echo QWEN13449_EXACT_PREFLIGHT_PASSED
+      - name: Always assert exact source and tracked worktree cleanliness
+        if: always()
+        working-directory: source
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$SOURCE_TREE"
+          git diff HEAD --exit-code
+          test -z "$(git status --porcelain --untracked-files=normal)"
+          echo QWEN13449_EXACT_TRACKED_SOURCE_UNCHANGED
